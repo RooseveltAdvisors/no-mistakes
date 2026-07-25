@@ -15,7 +15,7 @@ func TestPiAgent_BuildArgs(t *testing.T) {
 	pa := &piAgent{bin: "pi"}
 	args := pa.buildArgs()
 
-	expected := []string{"--mode", "json", "--no-session"}
+	expected := []string{"--mode", "json", "--no-session", "--no-extensions"}
 
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
@@ -31,7 +31,7 @@ func TestPiAgent_BuildArgs_PrependsExtraArgs(t *testing.T) {
 	pa := &piAgent{bin: "pi", extraArgs: []string{"--provider", "google"}}
 	args := pa.buildArgs()
 
-	expected := []string{"--provider", "google", "--mode", "json", "--no-session"}
+	expected := []string{"--provider", "google", "--mode", "json", "--no-session", "--no-extensions"}
 
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
