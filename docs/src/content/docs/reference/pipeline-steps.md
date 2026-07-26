@@ -156,7 +156,7 @@ Pushes the validated branch to the configured push target.
 - If `commands.format` is set, runs it first
 - Stages in-repo test evidence artifacts when `test.evidence.store_in_repo` is enabled and the evidence directory is not ignored by Git
 - Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`
-- Without fork routing, the push target is the credentialled upstream URL resolved from the worktree's `origin` remote at run time (the DB stores a redacted copy)
+- Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
 - Requires the commit proposed for push to equal or descend from the review-approved commit, allowing commits made by later pipeline steps without authorizing unrelated history
@@ -181,7 +181,7 @@ Creates or updates a pull request.
 
 **Skipped when:**
 - The branch is the default branch
-- The upstream host is not GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), or Azure DevOps (`dev.azure.com` / `*.visualstudio.com`)
+- The detected PR target host is not GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), or Azure DevOps (`dev.azure.com` / `*.visualstudio.com`)
 - The provider CLI (`gh` or `glab`) is not installed for GitHub or GitLab
 - The provider CLI is not authenticated for GitHub or GitLab
 - Bitbucket Cloud credentials are missing (`NO_MISTAKES_BITBUCKET_EMAIL` or `NO_MISTAKES_BITBUCKET_API_TOKEN`)
@@ -192,7 +192,8 @@ Creates or updates a pull request.
 - Checks for an existing PR on the branch
 - If one exists, updates it. If not, creates a new one.
 - Uses the provider CLI for GitHub/GitLab, the `az` CLI for Azure DevOps, and the Bitbucket API for Bitbucket Cloud
-- For GitHub fork routing, keeps `gh --repo` pointed at the parent repository from `origin`, checks existing PRs with the bare branch name, filters matching PRs by head owner, and creates PRs with `--head <fork-owner>:<branch>`
+- For GitHub fork routing with a GitHub parent `origin`, keeps `gh --repo` pointed at the parent repository, checks existing PRs with the bare branch name, filters matching PRs by head owner, and creates PRs with `--head <fork-owner>:<branch>`
+- If the fetch origin is a local filesystem remote and the configured push target is GitHub, uses that GitHub target for provider detection and `gh --repo` while preserving the local origin remote
 - PR title: agent-generated with user intent when available, in conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level
 - PR body includes a `## Intent` section when user intent is available, an agent-authored `## What Changed`, and regenerated `## Risk Assessment`, `## Testing`, and `## Pipeline` sections from recorded step results and rounds; auto-fix results in `## Pipeline` render as an issue -> fix -> verification narrative using captured fix summaries, re-check success text, and any still-open findings
 - Generated PR bodies are capped at 63,488 bytes, leaving a 2 KB safety buffer below GitHub's 65,536-character body limit.
@@ -209,6 +210,7 @@ Stores the PR URL in the database and streams it to the TUI.
 Monitors PR health after creation and auto-fixes CI failures. Mergeability polling and merge-conflict handling now apply to GitHub, GitLab, and Azure DevOps.
 
 **Active for GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), and Azure DevOps (`dev.azure.com` / `*.visualstudio.com`)**.
+Provider detection uses the same PR target URL as the PR step, so a local filesystem fetch origin with a configured GitHub push target is monitored through GitHub.
 
 - GitHub requires `gh` CLI, installed and authenticated.
 - GitLab requires `glab` CLI, installed and authenticated.

@@ -60,7 +60,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	if err := sctx.Ctx.Err(); err != nil {
 		return false, err
 	}
-	provider := scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL)
+	provider := scm.DetectProviderContext(sctx.Ctx, providerURL(sctx))
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
 		provider = scm.DetectProviderContext(sctx.Ctx, *sctx.Run.PRURL)
 	}
@@ -129,7 +129,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
+	provider := scm.DetectProviderContext(ctx, providerURL(sctx))
 	if provider == scm.ProviderUnknown && sctx.Run.PRURL != nil {
 		provider = scm.DetectProviderContext(ctx, *sctx.Run.PRURL)
 	}
@@ -188,7 +188,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	baseBranchTip := s.baseBranchTip
 	if baseBranchTip == nil {
 		baseBranchTip = func(ctx context.Context) (string, bool) {
-			return resolveDefaultBranchTip(ctx, sctx.WorkDir, sctx.Repo.UpstreamURL, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+			return resolveRunDefaultBranchTip(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 		}
 	}
 	started := now()

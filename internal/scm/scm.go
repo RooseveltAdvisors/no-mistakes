@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -25,9 +26,10 @@ const (
 
 type sshHostnameLookup func(context.Context, string) (string, error)
 
-// DetectProvider identifies the SCM provider for url. SSH host aliases are
-// resolved through the user's SSH configuration before detection falls back to
-// ProviderUnknown.
+// DetectProvider identifies the SCM provider for url. Local filesystem remotes
+// always resolve to ProviderUnknown, even when their path contains provider-like
+// host text. SSH host aliases are resolved through the user's SSH configuration
+// before detection falls back to ProviderUnknown.
 func DetectProvider(url string) Provider {
 	return DetectProviderContext(context.Background(), url)
 }
@@ -38,6 +40,13 @@ func DetectProviderContext(ctx context.Context, url string) Provider {
 }
 
 func detectProvider(ctx context.Context, url string, lookup sshHostnameLookup) Provider {
+	return detectProviderForGOOS(ctx, url, lookup, runtime.GOOS)
+}
+
+func detectProviderForGOOS(ctx context.Context, url string, lookup sshHostnameLookup, goos string) Provider {
+	if isLocalFilesystemRemoteForGOOS(url, goos) {
+		return ProviderUnknown
+	}
 	if provider := detectProviderWithoutSSH(url); provider != ProviderUnknown {
 		return provider
 	}
@@ -127,6 +136,32 @@ func isSSHRemote(remote string) bool {
 	}
 	slash := strings.IndexAny(remote, `/\\`)
 	return slash < 0 || colon < slash
+}
+
+func IsLocalFilesystemRemote(remote string) bool {
+	return isLocalFilesystemRemoteForGOOS(remote, runtime.GOOS)
+}
+
+func isLocalFilesystemRemoteForGOOS(remote, goos string) bool {
+	remote = strings.TrimSpace(remote)
+	lower := strings.ToLower(remote)
+	switch {
+	case remote == "":
+		return false
+	case strings.HasPrefix(lower, "file://"):
+		return true
+	case filepath.IsAbs(remote):
+		return true
+	case len(remote) >= 3 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':' && (remote[2] == '/' || remote[2] == '\\'):
+		return true
+	case goos == "windows" && len(remote) >= 2 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':':
+		return true
+	case remote == "." || remote == ".." || strings.HasPrefix(remote, "./") || strings.HasPrefix(remote, "../") || strings.HasPrefix(remote, `.\\`) || strings.HasPrefix(remote, `..\\`) || strings.HasPrefix(remote, "~/") || strings.HasPrefix(remote, `~\\`):
+		return true
+	case strings.Contains(remote, "://"):
+		return false
+	}
+	return !isSSHRemote(remote)
 }
 
 func lookupSSHHostname(ctx context.Context, alias string) (string, error) {

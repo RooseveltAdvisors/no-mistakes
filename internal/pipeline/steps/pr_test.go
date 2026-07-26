@@ -299,6 +299,81 @@ func TestPRStep_CreatesNewPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_LocalFetchOriginCreatesGitHubTargetPR(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Repo.UpstreamURL = filepath.Join(t.TempDir(), "github.com", "mirror.git")
+	sctx.Repo.ForkURL = "https://github.com/RooseveltAdvisors/firstmate.git"
+	sctx.Run.Branch = "refs/heads/feature"
+	if got := resolvePushURL(sctx); got != sctx.Repo.ForkURL {
+		t.Fatalf("push target = %q, want %q", got, sctx.Repo.ForkURL)
+	}
+	testFindings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"screenshot","label":"Checkout screenshot","path":"artifacts/checkout.png"}]}`
+	testStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(testStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetStepFindings(testStep.ID, testFindings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(testStep.ID, 1, "initial", &testFindings, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghLog := string(logData)
+	if !strings.Contains(ghLog, "pr create --head feature --base main --repo RooseveltAdvisors/firstmate") {
+		t.Fatalf("expected canonical PR against the GitHub push target, got:\n%s", ghLog)
+	}
+	if !strings.Contains(ghLog, "## What Changed") {
+		t.Fatalf("expected canonical generated PR body, got:\n%s", ghLog)
+	}
+	wantArtifactLink := "https://github.com/RooseveltAdvisors/firstmate/blob/" + headSHA + "/artifacts/checkout.png"
+	if !strings.Contains(ghLog, wantArtifactLink) {
+		t.Fatalf("expected PR body evidence to link to canonical GitHub target %q, got:\n%s", wantArtifactLink, ghLog)
+	}
+	if strings.Contains(ghLog, sctx.Repo.UpstreamURL) {
+		t.Fatalf("expected PR body evidence to avoid local fetch origin %q, got:\n%s", sctx.Repo.UpstreamURL, ghLog)
+	}
+}
+
+func TestPRStep_UnknownNonLocalOriginDoesNotUseGitHubPushTarget(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Repo.UpstreamURL = "https://code.example.com/org/repo.git"
+	sctx.Repo.ForkURL = "https://github.com/RooseveltAdvisors/firstmate.git"
+
+	outcome, err := (&PRStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.Skipped {
+		t.Fatalf("expected PR step to skip unknown non-local upstream, got %#v", outcome)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "pr create") {
+		t.Fatalf("expected unknown non-local upstream to avoid GitHub PR creation, got:\n%s", logData)
+	}
+}
+
 func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

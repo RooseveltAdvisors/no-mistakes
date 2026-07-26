@@ -64,7 +64,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("skipping PR creation on default branch %s", branch))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
-	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
+	provider := scm.DetectProviderContext(ctx, providerURL(sctx))
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
 		sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
@@ -229,7 +229,7 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) (string, strin
 	}
 
 	pipelineMD, riskLine := BuildPipelineSummary(steps, rounds)
-	testingMD := BuildTestingSummaryForPR(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir)
+	testingMD := BuildTestingSummaryForPR(steps, rounds, providerURL(sctx), sctx.Run.HeadSHA, sctx.WorkDir)
 	return pipelineMD, riskLine, testingMD
 }
 
