@@ -17,6 +17,9 @@ func providerURL(sctx *pipeline.StepContext) string {
 	if scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL) != scm.ProviderUnknown {
 		return sctx.Repo.UpstreamURL
 	}
+	if !scm.IsLocalFilesystemRemote(sctx.Repo.UpstreamURL) {
+		return sctx.Repo.UpstreamURL
+	}
 	return sctx.Repo.PushURL()
 }
 

@@ -44,7 +44,7 @@ func detectProvider(ctx context.Context, url string, lookup sshHostnameLookup) P
 }
 
 func detectProviderForGOOS(ctx context.Context, url string, lookup sshHostnameLookup, goos string) Provider {
-	if isLocalFilesystemRemote(url, goos) {
+	if isLocalFilesystemRemoteForGOOS(url, goos) {
 		return ProviderUnknown
 	}
 	if provider := detectProviderWithoutSSH(url); provider != ProviderUnknown {
@@ -138,7 +138,11 @@ func isSSHRemote(remote string) bool {
 	return slash < 0 || colon < slash
 }
 
-func isLocalFilesystemRemote(remote, goos string) bool {
+func IsLocalFilesystemRemote(remote string) bool {
+	return isLocalFilesystemRemoteForGOOS(remote, runtime.GOOS)
+}
+
+func isLocalFilesystemRemoteForGOOS(remote, goos string) bool {
 	remote = strings.TrimSpace(remote)
 	lower := strings.ToLower(remote)
 	switch {

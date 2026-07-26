@@ -349,6 +349,31 @@ func TestPRStep_LocalFetchOriginCreatesGitHubTargetPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_UnknownNonLocalOriginDoesNotUseGitHubPushTarget(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Repo.UpstreamURL = "https://code.example.com/org/repo.git"
+	sctx.Repo.ForkURL = "https://github.com/RooseveltAdvisors/firstmate.git"
+
+	outcome, err := (&PRStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.Skipped {
+		t.Fatalf("expected PR step to skip unknown non-local upstream, got %#v", outcome)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "pr create") {
+		t.Fatalf("expected unknown non-local upstream to avoid GitHub PR creation, got:\n%s", logData)
+	}
+}
+
 func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
