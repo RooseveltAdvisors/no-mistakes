@@ -42,7 +42,7 @@ func TestDetectProvider_LocalFilesystemRemoteWithProviderMarker(t *testing.T) {
 
 	tests := []string{
 		filepath.Join(t.TempDir(), "github.com", "mirror.git"),
-		`C:github.com\mirror.git`,
+		`C:\github.com\mirror.git`,
 		"../gitlab.com/mirror.git",
 		"file:///tmp/bitbucket.org/mirror.git",
 	}
@@ -50,6 +50,16 @@ func TestDetectProvider_LocalFilesystemRemoteWithProviderMarker(t *testing.T) {
 		if got := DetectProvider(remote); got != ProviderUnknown {
 			t.Fatalf("DetectProvider(%q) = %q, want %q", remote, got, ProviderUnknown)
 		}
+	}
+}
+
+func TestDetectProvider_WindowsDriveRelativeRemoteWithProviderMarker(t *testing.T) {
+	t.Setenv("GLAB_CONFIG_DIR", t.TempDir())
+	t.Setenv("GH_CONFIG_DIR", t.TempDir())
+
+	got := detectProviderForGOOS(context.Background(), `C:github.com\mirror.git`, nil, "windows")
+	if got != ProviderUnknown {
+		t.Fatalf("detectProviderForGOOS(windows drive-relative) = %q, want %q", got, ProviderUnknown)
 	}
 }
 
@@ -66,6 +76,12 @@ func TestDetectProvider_SSHHostAlias(t *testing.T) {
 		{
 			name:     "GitHub scp remote",
 			url:      "git@github-personal:owner/repo.git",
+			hostname: "github.com",
+			want:     ProviderGitHub,
+		},
+		{
+			name:     "GitHub single-letter scp alias",
+			url:      "g:owner/repo.git",
 			hostname: "github.com",
 			want:     ProviderGitHub,
 		},

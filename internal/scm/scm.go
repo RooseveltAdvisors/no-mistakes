@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -38,7 +39,11 @@ func DetectProviderContext(ctx context.Context, url string) Provider {
 }
 
 func detectProvider(ctx context.Context, url string, lookup sshHostnameLookup) Provider {
-	if isLocalFilesystemRemote(url) {
+	return detectProviderForGOOS(ctx, url, lookup, runtime.GOOS)
+}
+
+func detectProviderForGOOS(ctx context.Context, url string, lookup sshHostnameLookup, goos string) Provider {
+	if isLocalFilesystemRemote(url, goos) {
 		return ProviderUnknown
 	}
 	if provider := detectProviderWithoutSSH(url); provider != ProviderUnknown {
@@ -132,7 +137,7 @@ func isSSHRemote(remote string) bool {
 	return slash < 0 || colon < slash
 }
 
-func isLocalFilesystemRemote(remote string) bool {
+func isLocalFilesystemRemote(remote, goos string) bool {
 	remote = strings.TrimSpace(remote)
 	lower := strings.ToLower(remote)
 	switch {
@@ -142,7 +147,9 @@ func isLocalFilesystemRemote(remote string) bool {
 		return true
 	case filepath.IsAbs(remote):
 		return true
-	case len(remote) >= 2 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':':
+	case len(remote) >= 3 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':' && (remote[2] == '/' || remote[2] == '\\'):
+		return true
+	case goos == "windows" && len(remote) >= 2 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':':
 		return true
 	case remote == "." || remote == ".." || strings.HasPrefix(remote, "./") || strings.HasPrefix(remote, "../") || strings.HasPrefix(remote, `.\\`) || strings.HasPrefix(remote, `..\\`) || strings.HasPrefix(remote, "~/") || strings.HasPrefix(remote, `~\\`):
 		return true
