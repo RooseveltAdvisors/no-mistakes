@@ -38,6 +38,9 @@ func DetectProviderContext(ctx context.Context, url string) Provider {
 }
 
 func detectProvider(ctx context.Context, url string, lookup sshHostnameLookup) Provider {
+	if isLocalFilesystemRemote(url) {
+		return ProviderUnknown
+	}
 	if provider := detectProviderWithoutSSH(url); provider != ProviderUnknown {
 		return provider
 	}
@@ -127,6 +130,26 @@ func isSSHRemote(remote string) bool {
 	}
 	slash := strings.IndexAny(remote, `/\\`)
 	return slash < 0 || colon < slash
+}
+
+func isLocalFilesystemRemote(remote string) bool {
+	remote = strings.TrimSpace(remote)
+	lower := strings.ToLower(remote)
+	switch {
+	case remote == "":
+		return false
+	case strings.HasPrefix(lower, "file://"):
+		return true
+	case filepath.IsAbs(remote):
+		return true
+	case len(remote) >= 3 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':' && (remote[2] == '/' || remote[2] == '\\'):
+		return true
+	case remote == "." || remote == ".." || strings.HasPrefix(remote, "./") || strings.HasPrefix(remote, "../") || strings.HasPrefix(remote, `.\\`) || strings.HasPrefix(remote, `..\\`) || strings.HasPrefix(remote, "~/") || strings.HasPrefix(remote, `~\\`):
+		return true
+	case strings.Contains(remote, "://"):
+		return false
+	}
+	return !isSSHRemote(remote)
 }
 
 func lookupSSHHostname(ctx context.Context, alias string) (string, error) {

@@ -305,7 +305,7 @@ func TestPRStep_LocalFetchOriginCreatesGitHubTargetPR(t *testing.T) {
 	env, logFile := fakeGH(t, "")
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
-	sctx.Repo.UpstreamURL = dir
+	sctx.Repo.UpstreamURL = filepath.Join(t.TempDir(), "github.com", "mirror.git")
 	sctx.Repo.ForkURL = "https://github.com/RooseveltAdvisors/firstmate.git"
 	sctx.Run.Branch = "refs/heads/feature"
 	if got := resolvePushURL(sctx); got != sctx.Repo.ForkURL {

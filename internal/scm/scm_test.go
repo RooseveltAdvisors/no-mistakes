@@ -36,6 +36,22 @@ func TestDetectProvider(t *testing.T) {
 	}
 }
 
+func TestDetectProvider_LocalFilesystemRemoteWithProviderMarker(t *testing.T) {
+	t.Setenv("GLAB_CONFIG_DIR", t.TempDir())
+	t.Setenv("GH_CONFIG_DIR", t.TempDir())
+
+	tests := []string{
+		filepath.Join(t.TempDir(), "github.com", "mirror.git"),
+		"../gitlab.com/mirror.git",
+		"file:///tmp/bitbucket.org/mirror.git",
+	}
+	for _, remote := range tests {
+		if got := DetectProvider(remote); got != ProviderUnknown {
+			t.Fatalf("DetectProvider(%q) = %q, want %q", remote, got, ProviderUnknown)
+		}
+	}
+}
+
 func TestDetectProvider_SSHHostAlias(t *testing.T) {
 	t.Setenv("GLAB_CONFIG_DIR", t.TempDir())
 	t.Setenv("GH_CONFIG_DIR", t.TempDir())
