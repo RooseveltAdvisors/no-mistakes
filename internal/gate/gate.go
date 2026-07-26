@@ -46,9 +46,11 @@ func Init(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.Re
 	return InitWithFork(ctx, d, p, workDir, "")
 }
 
-// InitWithFork is Init plus an optional GitHub fork push URL. The origin remote
-// remains the parent repository used for PRs. When forkURL is empty, an
-// existing fork setting is preserved across idempotent refreshes.
+// InitWithFork is Init plus an optional GitHub push target. The origin remote
+// remains the fetch/default-branch authority; GitHub origins use forkURL as the
+// fork push target, and local filesystem origins use forkURL as the GitHub
+// push/PR target. When forkURL is empty, an existing fork setting is preserved
+// across idempotent refreshes.
 func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkURL string) (*db.Repo, bool, error) {
 	if classified, err := (gatecontext.Inspector{DB: d, Paths: p}).Inspect(ctx, gatecontext.Request{CWD: workDir, MarkerPresent: gatecontext.MarkerPresent()}); err != nil {
 		return nil, false, err
