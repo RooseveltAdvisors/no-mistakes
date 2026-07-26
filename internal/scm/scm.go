@@ -142,7 +142,7 @@ func isLocalFilesystemRemote(remote string) bool {
 		return true
 	case filepath.IsAbs(remote):
 		return true
-	case len(remote) >= 3 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':' && (remote[2] == '/' || remote[2] == '\\'):
+	case len(remote) >= 2 && ((remote[0] >= 'a' && remote[0] <= 'z') || (remote[0] >= 'A' && remote[0] <= 'Z')) && remote[1] == ':':
 		return true
 	case remote == "." || remote == ".." || strings.HasPrefix(remote, "./") || strings.HasPrefix(remote, "../") || strings.HasPrefix(remote, `.\\`) || strings.HasPrefix(remote, `..\\`) || strings.HasPrefix(remote, "~/") || strings.HasPrefix(remote, `~\\`):
 		return true

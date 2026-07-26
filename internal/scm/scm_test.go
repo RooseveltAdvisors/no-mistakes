@@ -42,6 +42,7 @@ func TestDetectProvider_LocalFilesystemRemoteWithProviderMarker(t *testing.T) {
 
 	tests := []string{
 		filepath.Join(t.TempDir(), "github.com", "mirror.git"),
+		`C:github.com\mirror.git`,
 		"../gitlab.com/mirror.git",
 		"file:///tmp/bitbucket.org/mirror.git",
 	}
