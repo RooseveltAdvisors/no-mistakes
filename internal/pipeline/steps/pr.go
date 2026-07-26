@@ -229,7 +229,7 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) (string, strin
 	}
 
 	pipelineMD, riskLine := BuildPipelineSummary(steps, rounds)
-	testingMD := BuildTestingSummaryForPR(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir)
+	testingMD := BuildTestingSummaryForPR(steps, rounds, providerURL(sctx), sctx.Run.HeadSHA, sctx.WorkDir)
 	return pipelineMD, riskLine, testingMD
 }
 
