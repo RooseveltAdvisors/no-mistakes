@@ -87,7 +87,8 @@ With this setup, the push and CI auto-fix push steps update the fork, while the 
 The GitHub PR step opens PRs with a fork-qualified head such as `your-user:feature-branch`.
 Re-running `no-mistakes init` later preserves the stored fork URL unless you pass a new `--fork-url`.
 
-Fork routing currently requires both `origin` and `--fork-url` to be GitHub remotes with owner/repo paths.
+When `origin` is a local filesystem remote, `--fork-url` may instead be a canonical GitHub repository URL. no-mistakes keeps the local fetch origin and uses the GitHub target for branch pushes, PR creation, and CI monitoring.
+Fork routing currently requires `--fork-url` to be a GitHub remote with an owner/repo path, and `origin` must be either a GitHub parent remote with an owner/repo path or a local filesystem remote.
 GitLab and Bitbucket fork MR/PR routing are not implemented yet; if a legacy or manually edited repo record has `fork_url` set for those providers, PR creation skips instead of opening an unsafe self PR.
 
 ## GitLab

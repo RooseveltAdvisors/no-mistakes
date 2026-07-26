@@ -65,7 +65,8 @@ $ no-mistakes init
 
 `origin` is unchanged.
 Without fork routing, you can bypass the gate for a specific push with `git push origin <branch>`.
-With `--fork-url`, bypassing the gate means pushing to your fork URL yourself.
+With GitHub parent/fork routing, bypassing the gate means pushing to your fork URL yourself.
+With a local filesystem `origin`, bypassing the gate means pushing to the configured GitHub target yourself.
 
 You can safely re-run `no-mistakes init` later to refresh gate wiring or update the installed agent skill after an upgrade.
 If you rename or move the repo directory, re-run `no-mistakes init` from the new path to reattach the existing gate and keep its run history.

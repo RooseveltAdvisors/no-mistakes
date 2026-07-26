@@ -25,7 +25,7 @@ Valid step names are `intent`, `rebase`, `review`, `test`, `document`, `lint`, `
 
 Initialize or refresh the gate for the current repository.
 
-`init` requires an `origin` remote to identify the upstream repository: later pipeline steps push validated branches to the configured target and open pull requests against that upstream. If `origin` is missing, add it with `git remote add origin <url>`, replacing `<url>` with the upstream repository's URL, then re-run `init`.
+`init` requires an `origin` remote to identify the fetch/default-branch authority: later pipeline steps push validated branches to the configured target and open pull requests against the provider-backed PR target. If `origin` is missing, add it with `git remote add origin <url>`, replacing `<url>` with the upstream repository's URL, then re-run `init`.
 
 ```sh
 no-mistakes init
@@ -34,7 +34,7 @@ no-mistakes init --fork-url git@github.com:you/my-repo.git
 
 | Flag         | Type     | Default | Description                                                                   |
 | ------------ | -------- | ------- | ----------------------------------------------------------------------------- |
-| `--fork-url` | `string` | (none)  | GitHub fork remote URL to push branches to while opening PRs against `origin` |
+| `--fork-url` | `string` | (none)  | GitHub push target URL used for fork routing or local-origin GitHub PR routing |
 
 Creates or refreshes a local bare repo, installs the managed pre-receive admission and post-receive notification hooks, best-effort isolates the gate repo's hook path from shared git config changes when Git supports `config --worktree`, adds or repairs the `no-mistakes` git remote, detects the default branch, records or updates the repo in SQLite, installs the `/no-mistakes` agent skill at user level into `~/.claude/skills/no-mistakes/SKILL.md` and `~/.agents/skills/no-mistakes/SKILL.md`, and ensures the daemon is running, installing the managed service when available and falling back to a detached daemon otherwise.
 `init` writes no skill files into the repo; the user-level copies cover every supported agent (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex, OpenCode, Rovo Dev, and Pi) across all repos.
@@ -44,7 +44,8 @@ The gate advertises Git push-option support, so you can skip steps for one push 
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass `--fork-url` with your fork remote URL.
 The push, rebase branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
-Fork routing currently requires both `origin` and `--fork-url` to be GitHub remotes with owner/repo paths.
+When `origin` is a local filesystem remote, `--fork-url` may instead be a canonical GitHub repository URL; no-mistakes preserves the local fetch origin and uses the GitHub target for push, PR, and CI provider routing.
+Fork routing currently requires `--fork-url` to be a GitHub remote with an owner/repo path, and `origin` must be either a GitHub parent remote with an owner/repo path or a local filesystem remote.
 
 Re-running `init` on an already-initialized repo succeeds and reports `Gate already initialized (refreshed)`.
 It refreshes managed gate wiring, origin/default-branch metadata, hook-path isolation, and the installed agent skill, overwriting any stale `SKILL.md` content from an older binary.

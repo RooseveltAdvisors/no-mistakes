@@ -17,7 +17,7 @@ Safest local verification sequence after non-trivial changes:
 **Fork Routing**
 
 - `repos.upstream_url` is the fetch/default-branch authority and, for normal GitHub fork routing, the parent repository used for PR base routing; `repos.fork_url` is an optional GitHub fork or authenticated push target.
-- `no-mistakes init --fork-url <url>` expects `origin` to point at the GitHub parent repository and `<url>` at the contributor fork; plain `no-mistakes init` preserves an existing fork URL on idempotent refresh.
+- For normal GitHub fork routing, `no-mistakes init --fork-url <url>` expects `origin` to point at the GitHub parent repository and `<url>` at the contributor fork; plain `no-mistakes init` preserves an existing fork URL on idempotent refresh.
 - Push and CI auto-fix push code must resolve the push URL via `resolvePushURL` (`internal/pipeline/steps/common_git.go`) so configured forks still receive branch updates; the non-fork path recovers the credentialled upstream from the worktree's `origin` remote at run time because the DB `upstream_url` is stored redacted (see Credential Redaction below). `Repo.PushURL()` remains correct only for fork-only callers (e.g. `rebase.go`), since fork URLs carry no embedded credentials.
 - For normal GitHub parent/fork routing, PR code must keep `--repo` pointed at the parent and use `--head <fork_owner>:<branch>` when `fork_url` is set; existing-PR lookup must list by the bare branch and filter head-owner fields, never pass `<owner>:<branch>` to `gh pr list --head`.
 - When `upstream_url` is a local filesystem fetch origin and `fork_url` is the authenticated GitHub push target, provider and GitHub PR host resolution must fall back to that push target without rewriting the preserved local origin.

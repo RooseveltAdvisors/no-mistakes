@@ -90,6 +90,6 @@ func newInitCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&forkURL, "fork-url", "", "GitHub fork remote URL to push branches to while opening PRs against origin")
+	cmd.Flags().StringVar(&forkURL, "fork-url", "", "GitHub fork push target, or GitHub push/PR target when origin is a local filesystem path")
 	return cmd
 }
