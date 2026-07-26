@@ -169,13 +169,19 @@ func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkUR
 func validateForkRouting(ctx context.Context, upstreamURL, forkURL string) error {
 	parentProvider := scm.DetectProviderContext(ctx, upstreamURL)
 	forkProvider := scm.DetectProviderContext(ctx, forkURL)
+	if forkProvider == scm.ProviderGitHub && scm.IsLocalFilesystemRemote(upstreamURL) {
+		if github.RepoSlug(forkURL) == "" {
+			return fmt.Errorf("fork URL routing requires a GitHub target with an owner/repo path")
+		}
+		return nil
+	}
 	if parentProvider == scm.ProviderGitHub && forkProvider == scm.ProviderGitHub {
 		if github.RepoSlug(upstreamURL) == "" || github.RepoSlug(forkURL) == "" {
 			return fmt.Errorf("fork URL routing requires GitHub parent and fork remotes with owner/repo paths")
 		}
 		return nil
 	}
-	return fmt.Errorf("fork URL routing is currently supported only for GitHub parent and fork remotes (parent provider: %s, fork provider: %s)", parentProvider, forkProvider)
+	return fmt.Errorf("fork URL routing requires a GitHub parent or local filesystem origin and a GitHub fork target (parent provider: %s, fork provider: %s)", parentProvider, forkProvider)
 }
 
 // provisionGate creates or repairs the on-disk gate for a repo: the bare repo,

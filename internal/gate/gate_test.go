@@ -363,6 +363,32 @@ func TestInitIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestInitWithForkAllowsLocalParentAndGitHubTarget(t *testing.T) {
+	workDir := setupTestRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d := openTestDB(t, p)
+	ctx := context.Background()
+	origin, err := gitpkg.GetConfiguredRemoteURL(ctx, workDir, "origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkURL := "https://github.com/RooseveltAdvisors/firstmate.git"
+
+	repo, created, err := InitWithFork(ctx, d, p, workDir, forkURL)
+	if err != nil {
+		t.Fatalf("init local parent with GitHub target: %v", err)
+	}
+	if !created || repo.UpstreamURL != origin || repo.ForkURL != forkURL {
+		t.Fatalf("repo = %+v, created = %v", repo, created)
+	}
+	if got, err := gitpkg.GetConfiguredRemoteURL(ctx, workDir, "origin"); err != nil || got != origin {
+		t.Fatalf("origin = %q, %v; want preserved %q", got, err, origin)
+	}
+}
+
 func TestInitWithForkPreservesForkOnPlainReinit(t *testing.T) {
 	workDir := setupTestRepo(t)
 	nmRoot := t.TempDir()
