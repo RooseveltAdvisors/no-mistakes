@@ -299,6 +299,35 @@ func TestPRStep_CreatesNewPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_LocalFetchOriginCreatesGitHubTargetPR(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Repo.UpstreamURL = dir
+	sctx.Repo.ForkURL = "https://github.com/RooseveltAdvisors/firstmate.git"
+	sctx.Run.Branch = "refs/heads/feature"
+	if got := resolvePushURL(sctx); got != sctx.Repo.ForkURL {
+		t.Fatalf("push target = %q, want %q", got, sctx.Repo.ForkURL)
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghLog := string(logData)
+	if !strings.Contains(ghLog, "pr create --head feature --base main --repo RooseveltAdvisors/firstmate") {
+		t.Fatalf("expected canonical PR against the GitHub push target, got:\n%s", ghLog)
+	}
+	if !strings.Contains(ghLog, "## What Changed") {
+		t.Fatalf("expected canonical generated PR body, got:\n%s", ghLog)
+	}
+}
+
 func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

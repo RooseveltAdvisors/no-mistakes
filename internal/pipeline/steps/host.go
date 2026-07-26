@@ -17,6 +17,13 @@ import (
 // working directory and environment. When the host cannot be constructed
 // (unknown provider, missing Bitbucket config, etc) it returns nil and a
 // human-readable skip reason suitable for logging.
+func providerURL(sctx *pipeline.StepContext) string {
+	if scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL) != scm.ProviderUnknown {
+		return sctx.Repo.UpstreamURL
+	}
+	return sctx.Repo.PushURL()
+}
+
 func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, string) {
 	cmdFactory := func(_ context.Context, name string, args ...string) *exec.Cmd {
 		return stepCmd(sctx, name, args...)
@@ -30,8 +37,9 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 		// the upstream remote URL is unavailable. The hostname also scopes
 		// the auth-status check so a stale token on any other configured gh
 		// host cannot make this repo look unauthenticated.
-		host := scm.ResolveHost(sctx.Ctx, sctx.Repo.UpstreamURL)
-		repo := github.HostPrefixedSlugForHost(sctx.Repo.UpstreamURL, host)
+		targetURL := providerURL(sctx)
+		host := scm.ResolveHost(sctx.Ctx, targetURL)
+		repo := github.HostPrefixedSlugForHost(targetURL, host)
 		if repo == "" && sctx.Run.PRURL != nil {
 			prHost := scm.ResolveHost(sctx.Ctx, *sctx.Run.PRURL)
 			repo = github.HostPrefixedSlugForHost(*sctx.Run.PRURL, prHost)
@@ -40,7 +48,7 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 			}
 		}
 		forkRepo := ""
-		if sctx.Repo.ForkURL != "" {
+		if sctx.Repo.ForkURL != "" && targetURL == sctx.Repo.UpstreamURL {
 			// forkRepo is only used to extract the fork owner for --head owner:branch;
 			// the plain slug (without host prefix) is correct here.
 			forkRepo = github.RepoSlug(sctx.Repo.ForkURL)
