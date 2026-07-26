@@ -23,6 +23,7 @@ Safest local verification sequence after non-trivial changes:
 - When `upstream_url` is a local filesystem fetch origin and `fork_url` is the authenticated GitHub push target, provider and GitHub PR host resolution must fall back to that push target without rewriting the preserved local origin.
 - GitLab and Bitbucket fork MR/PR routing is intentionally out of scope until implemented end to end; if a legacy row has `fork_url` for those hosts, PR creation must skip instead of opening a self PR.
 - Every new run best-effort refreshes registered upstream/fork URLs from the working clone through `gate.RefreshRepoURLs`: origin is the upstream authority, an existing fork requires one uniquely matching clone remote, both DB fields replace atomically, and every discovery/validation/write failure logs only a bounded reason and continues with the exact old registration. The refresh never rewrites clone or gate remotes; `Repo.URLsVerified` is run-scoped evidence that trusted fetch/push may use the refreshed DB URL instead of an inherited stale gate origin.
+- Regressions: `TestPRStep_LocalFetchOriginCreatesGitHubTargetPR`, `TestPRStep_UnknownNonLocalOriginDoesNotUseGitHubPushTarget`, `TestDetectProvider_LocalFilesystemRemoteWithProviderMarker`.
 
 **Credential Redaction in Stored URLs and Errors (security)**
 

@@ -210,6 +210,7 @@ Stores the PR URL in the database and streams it to the TUI.
 Monitors PR health after creation and auto-fixes CI failures. Mergeability polling and merge-conflict handling now apply to GitHub, GitLab, and Azure DevOps.
 
 **Active for GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), and Azure DevOps (`dev.azure.com` / `*.visualstudio.com`)**.
+Provider detection uses the same PR target URL as the PR step, so a local filesystem fetch origin with a configured GitHub push target is monitored through GitHub.
 
 - GitHub requires `gh` CLI, installed and authenticated.
 - GitLab requires `glab` CLI, installed and authenticated.
