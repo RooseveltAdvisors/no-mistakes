@@ -26,9 +26,10 @@ const (
 
 type sshHostnameLookup func(context.Context, string) (string, error)
 
-// DetectProvider identifies the SCM provider for url. SSH host aliases are
-// resolved through the user's SSH configuration before detection falls back to
-// ProviderUnknown.
+// DetectProvider identifies the SCM provider for url. Local filesystem remotes
+// always resolve to ProviderUnknown, even when their path contains provider-like
+// host text. SSH host aliases are resolved through the user's SSH configuration
+// before detection falls back to ProviderUnknown.
 func DetectProvider(url string) Provider {
 	return DetectProviderContext(context.Background(), url)
 }

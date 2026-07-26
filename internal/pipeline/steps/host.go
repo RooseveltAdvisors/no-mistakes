@@ -13,10 +13,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm/gitlab"
 )
 
-// buildHost returns a scm.Host for the given provider, wired to sctx's
-// working directory and environment. When the host cannot be constructed
-// (unknown provider, missing Bitbucket config, etc) it returns nil and a
-// human-readable skip reason suitable for logging.
 func providerURL(sctx *pipeline.StepContext) string {
 	if scm.DetectProviderContext(sctx.Ctx, sctx.Repo.UpstreamURL) != scm.ProviderUnknown {
 		return sctx.Repo.UpstreamURL
@@ -24,6 +20,12 @@ func providerURL(sctx *pipeline.StepContext) string {
 	return sctx.Repo.PushURL()
 }
 
+// buildHost returns a scm.Host for the given provider, wired to sctx's working
+// directory and environment. If the fetch origin is local and the configured
+// push target is provider-backed, GitHub host resolution uses that push target
+// without rewriting the preserved fetch origin. When the host cannot be
+// constructed (unknown provider, missing Bitbucket config, etc) it returns nil
+// and a human-readable skip reason suitable for logging.
 func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, string) {
 	cmdFactory := func(_ context.Context, name string, args ...string) *exec.Cmd {
 		return stepCmd(sctx, name, args...)
