@@ -130,6 +130,7 @@ auto_fix:
 			t.Fatalf("claude leaked into subscription route: %s", line)
 		}
 	}
+	t.Logf("doctor subscription routing evidence:\n%s", out)
 
 	branch := "feature/sub-route"
 	h.CommitChange(branch, "hello.txt", "subscription routing\n", "feat: subscription routing fixture")
@@ -142,6 +143,7 @@ auto_fix:
 		}
 		t.Fatalf("run status = %s error=%q", run.Status, errMsg)
 	}
+	t.Logf("pipeline subscription routing evidence: branch=%s status=%s", branch, run.Status)
 
 	daemonLog := filepath.Join(h.NMHome, "logs", "daemon.log")
 	logData, err := os.ReadFile(daemonLog)
