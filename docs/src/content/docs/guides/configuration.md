@@ -10,7 +10,7 @@ with sensible defaults for everything else.
 The goal is not to make you configure a mini CI system. The default path should
 work. Config exists for the parts that genuinely vary by machine or repo:
 
-- which agent or ordered fallback list you prefer
+- which agent, ordered fallback list, or subscription-backed candidate set you prefer
 - which test or lint commands are the canonical ones for this repo
 - where test evidence artifacts should be stored
 - how aggressive the auto-fix loop should be
@@ -54,7 +54,7 @@ The rest of this page covers only the cross-cutting rules that involve both file
 ## Precedence
 
 - Repo config overrides global config field by field: repo `agent` replaces the global `agent` (including a full ordered fallback list), while `auto_fix`, `commit`, `intent`, and `test.evidence` overlay individual fields and fall through to the global default for anything unset (`intent.disabled_readers` adds to the globally disabled readers instead of replacing them).
-- `agent_path_override`, `agent_args_override`, `acpx_path`, `acp_registry_overrides`, `ci_timeout`, `daemon_connect_timeout`, `step_quiet_warning`, `log_level`, and `session_reuse` are global-only fields.
+- `agent_path_override`, `agent_args_override`, `subscription_agents`, `acpx_path`, `acp_registry_overrides`, `ci_timeout`, `daemon_connect_timeout`, `step_quiet_warning`, `log_level`, and `session_reuse` are global-only fields.
 - `commands`, `ignore_patterns`, `document.instructions`, `allow_repo_commands`, and `disable_project_settings` are repo-only fields. By default, `commands` and `agent` are read from the trusted default branch; a trusted `allow_repo_commands: true` opt-in instead honors their pushed-branch values. The other gate-control fields always come from the trusted default branch. See the [Repo Config Reference](/no-mistakes/reference/repo-config/) security note.
 - no-mistakes reloads global config while setting up each run, so edits made before starting a run apply to it. For repeatable profiles (for example fast versus deep Codex settings), use separately initialized `NM_HOME` roots; `NM_HOME` moves all no-mistakes state, not just config.
 
@@ -65,5 +65,5 @@ An empty `commands.format` runs no separate formatter, so configure it explicitl
 Either way, available user intent can trigger an evidence-oriented agent follow-up after a successful test baseline, and evidence stays in a temporary local directory unless the repo opts into `test.evidence.store_in_repo`.
 The [Repo Config Reference](/no-mistakes/reference/repo-config/) owns the exact per-command semantics (including that `commands.test` is targeted, not CI-parity), command process lifetime, and the `ignore_patterns` match rules.
 
-Before a new validation gate starts, its effective agent configuration must resolve to a runnable native agent or ACP runner; otherwise the gate fails before its first pipeline step, even when explicit commands are configured.
-Run `no-mistakes doctor` to check the global runner, and see [Choosing an Agent](/no-mistakes/guides/agents/) for how agent selection and fallback lists behave.
+Before a new validation gate starts, its effective agent configuration must resolve to a runnable native agent, ACP runner, or subscription route; otherwise the gate fails before its first pipeline step, even when explicit commands are configured.
+Run `no-mistakes doctor` to check the global runner, and see [Choosing an Agent](/no-mistakes/guides/agents/) for how agent selection, subscription quota routing, and fallback lists behave.

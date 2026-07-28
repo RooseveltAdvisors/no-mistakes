@@ -48,6 +48,7 @@ Safest local verification sequence after non-trivial changes:
 - `skills/no-mistakes/SKILL.md` is **generated**: the source of truth is the `body` constant in `internal/skill/skill.go`. Edit the body, then `make skill`; `make lint` fails CI on drift. Never edit `SKILL.md` directly. `no-mistakes init` ships this rendering to agents at user level.
 - Agent-driving guidance is owned by the skill body and the live `axi` output strings (`internal/cli/axi*.go`); `docs/src/content/docs/guides/agents.md` carries only the canonical invariant sentences pinned by `internal/cli/axi_guidance_test.go` plus a pointer to the skill. When you change driving guidance, change the skill body and the point-of-use `axi` strings together; that drift test is the sync check.
 - Review auto-fix is disabled by default (`auto_fix.review: 0` in `config.go` `autoFixDefaults`), so blocking and ask-user review findings park for an agent decision; keep the skill, the live `axi` gate `note`, and docs qualified if you touch review auto-fix.
+- `agent: subscription` + global `subscription_agents` ranks only named candidates from one fresh `quota-axi --json` snapshot at `ResolveAgent` (run start / doctor), never per invocation (preserves review/fixer session continuity) and never invents healthy quota for unknown/stale providers or unlisted backends such as Claude. Owner: `internal/quota`, `config.ResolveAgent` / `createResolvedPipelineAgents`; field docs in `docs/.../reference/global-config.md` (`subscription_agents`).
 
 **Context, Concurrency, and Processes**
 

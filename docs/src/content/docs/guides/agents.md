@@ -29,6 +29,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
+- Use `agent: subscription` with global `subscription_agents` when you want run-start ranking across named subscription-backed candidates (for example Kimi, Codex, and Grok) from a fresh `quota-axi` snapshot, without letting `auto` pull in Claude or any unlisted provider.
 - Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice; leave `commands.test` empty for agent-selected smallest relevant checks. Do not configure a complete-suite walk as local Test - remote CI owns broad regression.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
@@ -114,6 +115,45 @@ Repo config takes precedence over global config.
 agent: [codex, claude]
 ```
 
+### Subscription-backed quota routing
+
+When several authenticated subscriptions should share pipeline work, set `agent: subscription` and name **only** the candidates you allow under global `subscription_agents`.
+`auto` is not used, so Claude never enters unless you list it.
+
+Selection runs once at pipeline agent resolution (run start / `doctor`): no-mistakes calls `quota-axi --json`, ranks known effective headroom and pace, and builds an ordered fallback route from that snapshot.
+It does not rebalance mid-run per invocation, so reviewer and fixer session continuity stays intact for session-capable backends such as Codex.
+Unknown or stale quota is never treated as healthy headroom; see the [`subscription_agents` field reference](/no-mistakes/reference/global-config/#subscription_agents) for the ranking rules, Pi provider/model identities, and inspectable reasons.
+
+Migration example for an installation that must use Kimi, Codex, and Grok subscriptions and must not use Claude:
+
+```yaml
+# ~/.no-mistakes/config.yaml
+agent: subscription
+subscription_agents:
+  candidates:
+    - name: kimi
+      agent: pi
+      quota_provider: kimi
+      provider: kimi-coding
+      model: k3
+    - name: codex
+      agent: codex
+      quota_provider: codex
+    - name: grok
+      agent: pi
+      quota_provider: grok
+      provider: xai
+      model: grok-4.5
+# Optional Codex tuning remains global and applies when a candidate omits args:
+# agent_args_override:
+#   codex:
+#     - -m
+#     - gpt-5.4
+```
+
+Install `quota-axi` on the daemon host (`npx -y quota-axi` or a global install), confirm `quota-axi --json` returns fresh Kimi/Codex/Grok rows, then run `no-mistakes doctor` and look for `subscription route runnable (...)`.
+Roll out by updating `~/.no-mistakes/config.yaml` only; the daemon reloads global config when starting each run, so a shared-daemon restart is not required for the new route to apply to the next gate.
+
 ### Optional ACP target
 
 If you install `acpx` separately, you can opt into any ACP target with the `acp:` prefix, for example `agent: acp:gemini`.
@@ -190,13 +230,14 @@ The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command an
 When the daemon is running through a managed service, its `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories; on Windows it reuses the current process environment.
 If native agent discovery does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and set an explicit override; [Environment the daemon sees](/no-mistakes/reference/environment/#environment-the-daemon-sees) owns the full resolution story.
 
-Five global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
+Six global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
 
 - [`agent_path_override`](/no-mistakes/reference/global-config/#agent_path_override) - custom binary paths per native agent, plus the default native binary-name table.
 - [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) - extra CLI flags per native agent for model selection, service tier, reasoning depth, or permission mode, including the reserved-flag rules and smart defaults. Keep it global-only; it reflects your local agent setup rather than repo policy.
+- [`subscription_agents`](/no-mistakes/reference/global-config/#subscription_agents) - named subscription-backed candidates and quota-axi ranking for `agent: subscription`.
 - [`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) - the bridge binary path for explicit ACP targets and first-class ACP aliases.
 - [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) - raw ACP target commands, including replacements for alias defaults such as `cursor-agent acp`, plus their availability-probing rules.
-- [`agent`](/no-mistakes/reference/global-config/#agent) - the `auto` resolution order and ordered fallback-list semantics.
+- [`agent`](/no-mistakes/reference/global-config/#agent) - the `auto` resolution order, `subscription` mode, and ordered fallback-list semantics.
 
 ## Review session reuse
 
@@ -275,6 +316,7 @@ Starts a persistent HTTP server (`opencode serve`) on first use and reuses it ac
 
 Spawns a `pi` subprocess for each invocation with `--mode json --no-session`.
 Any `agent_args_override.pi` flags are inserted before no-mistakes' managed flags.
+Under `agent: subscription`, per-candidate `args` or `provider`/`model` sugar replace that shared override so Kimi (`kimi-coding`) and Grok (`xai`) identities stay distinct.
 Reads JSONL events from stdout and streams incremental text deltas to the TUI.
 When structured output is requested, no-mistakes injects the JSON schema into the prompt and validates the final text response.
 

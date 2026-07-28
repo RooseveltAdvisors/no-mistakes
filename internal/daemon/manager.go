@@ -220,6 +220,45 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
 		return nil, err
 	}
+	created, err := createResolvedPipelineAgents(cfg)
+	if err != nil {
+		return nil, err
+	}
+	ag := agent.NewFallback(created)
+	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an
+	// unverified harness when the repo disabled project settings; otherwise run
+	// every adapter as before.
+	if cfg.DisableProjectSettings {
+		if err := agent.EnsureGateNeutralized(ag); err != nil {
+			_ = ag.Close()
+			return nil, err
+		}
+	}
+	return ag, nil
+}
+
+// createResolvedPipelineAgents builds concrete agents from ResolveAgent output.
+// Subscription routes carry per-candidate args and labels; legacy Agent/Agents
+// lists keep shared agent_args_override behavior.
+func createResolvedPipelineAgents(cfg *config.Config) ([]agent.Agent, error) {
+	if cfg.SubscriptionRoute != nil && len(cfg.SubscriptionRoute.Ordered) > 0 {
+		created := make([]agent.Agent, 0, len(cfg.SubscriptionRoute.Ordered))
+		for _, rc := range cfg.SubscriptionRoute.Ordered {
+			next, err := agent.NewWithOptions(rc.Agent, cfg.AgentPathFor(rc.Agent), rc.Args, agent.Options{
+				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
+				DisableProjectSettings: cfg.DisableProjectSettings,
+			})
+			if err != nil {
+				for _, existing := range created {
+					_ = existing.Close()
+				}
+				return nil, fmt.Errorf("create subscription agent %s (%s): %w", rc.Name, rc.Agent, err)
+			}
+			created = append(created, agent.WithSteering(agent.WithCandidateLabel(next, rc.Name)))
+		}
+		return created, nil
+	}
+
 	agents := cfg.Agents
 	if len(agents) == 0 {
 		agents = []types.AgentName{cfg.Agent}
@@ -238,17 +277,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 		}
 		created = append(created, agent.WithSteering(next))
 	}
-	ag := agent.NewFallback(created)
-	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an
-	// unverified harness when the repo disabled project settings; otherwise run
-	// every adapter as before.
-	if cfg.DisableProjectSettings {
-		if err := agent.EnsureGateNeutralized(ag); err != nil {
-			_ = ag.Close()
-			return nil, err
-		}
-	}
-	return ag, nil
+	return created, nil
 }
 
 func resolveGitPath(workDir, value string) string {
@@ -768,26 +797,14 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			trackStartFailure("resolve_agent")
 			return "", err
 		}
-		agents := cfg.Agents
-		if len(agents) == 0 {
-			agents = []types.AgentName{cfg.Agent}
+		created, agErr := createResolvedPipelineAgents(cfg)
+		if agErr != nil {
+			m.db.UpdateRunError(run.ID, agErr.Error())
+			trackStartFailure("create_agent")
+			return "", agErr
 		}
-		created := make([]agent.Agent, 0, len(agents))
-		for _, name := range agents {
-			next, agErr := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
-				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
-				DisableProjectSettings: cfg.DisableProjectSettings,
-			})
-			if agErr != nil {
-				m.db.UpdateRunError(run.ID, fmt.Sprintf("create agent %s: %s", name, agErr))
-				trackStartFailure("create_agent")
-				return "", fmt.Errorf("create agent %s: %w", name, agErr)
-			}
-			// Steer every pipeline agent to keep writes inside the worktree and
-			// avoid mutating system state (e.g. brew/Homebrew touching
-			// /Applications), which triggers macOS App Management prompts.
-			created = append(created, agent.WithSteering(next))
-		}
+		// Steer is applied inside createResolvedPipelineAgents. Fallback preserves
+		// ordered subscription or legacy agent lists for process-level recovery.
 		ag = agent.NewFallback(created)
 		// Fail closed ONLY under the trusted opt-out: when the repo asked to
 		// disable project settings, refuse any resolved harness that lacks a
