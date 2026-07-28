@@ -21,7 +21,15 @@ import (
 // deadlocks the wait against the exit it is waiting for, which leaves the old
 // daemon alive (and holding the singleton lock) for the whole stop timeout.
 func TestStopDetachedDaemonReleasesShutdownConnectionBeforeWaiting(t *testing.T) {
-	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm-home"))
+	// Use a short temp dir: this test binds a real Unix socket, and the
+	// per-test t.TempDir() path blows past the macOS 104-byte sun_path limit.
+	tmpDir, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	p := paths.WithRoot(tmpDir)
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
