@@ -1,11 +1,23 @@
 name: Require no-mistakes
 run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
+# Always-emitted, metadata-only gate. Every pull request must carry the
+# deterministic signature that no-mistakes writes into the PR body.
+#
+# Fork safety: the trigger is pull_request_target, so the workflow that runs is
+# always the base branch copy. A PR that edits or deletes this workflow cannot
+# exempt itself. There are no branch/path filters, so the check is emitted on
+# every PR and is safe to require.
+#
+# Bot exemptions: github-actions[bot], dependabot[bot], and release-please[bot]
+# are exempt so release automation and Dependabot keep working. Other authors
+# (human or bot) must raise PRs through `git push no-mistakes`.
+#
+# Least privilege: contents: read only, no secrets, no checkout, and no PR-head
+# code execution. The job reads only the PR body from the event payload.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, edited, synchronize, reopened]
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -22,9 +34,11 @@ jobs:
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # Known automation accounts are exempt so the release pipeline keeps working:
     # - github-actions[bot] opens the release-please PR via GITHUB_TOKEN
     # - dependabot[bot] opens dependency update PRs
+    # - release-please[bot] opens release PRs when that identity is used
     # Other authors (human or bot) must raise PRs through `git push no-mistakes`.
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&

@@ -79,18 +79,68 @@ func TestNoMistakesRequiredWorkflowReadsPRBodyViaEnv(t *testing.T) {
 
 // TestNoMistakesRequiredWorkflowTriggersOnRelevantPREvents ensures the check
 // re-runs when the PR body is edited so a contributor cannot bypass by opening
-// clean then editing the body.
+// clean then editing the body. The hardened gate uses pull_request_target with
+// no branch filter so the base-branch copy always runs on every PR.
 func TestNoMistakesRequiredWorkflowTriggersOnRelevantPREvents(t *testing.T) {
-	data, err := os.ReadFile(".github/workflows/no-mistakes-required.yml")
-	if err != nil {
-		t.Fatalf("read workflow: %v", err)
-	}
-	content := string(data)
+	workflow := loadRequiredWorkflow(t)
 
-	for _, typ := range []string{"opened", "edited", "synchronize", "reopened"} {
-		if !strings.Contains(content, typ) {
-			t.Errorf("workflow must trigger on pull_request type %q", typ)
+	trigger, ok := workflow.On["pull_request_target"]
+	if !ok {
+		t.Fatal("required workflow must trigger on pull_request_target so the base branch copy always runs")
+	}
+	if _, ok := workflow.On["pull_request"]; ok {
+		t.Fatal("required workflow must not use pull_request; that trigger lets a PR edit/delete the workflow and exempt itself")
+	}
+
+	triggerMap, ok := trigger.(map[string]any)
+	if !ok {
+		t.Fatalf("pull_request_target config has unexpected type %T", trigger)
+	}
+	if _, ok := triggerMap["branches"]; ok {
+		t.Fatal("required workflow must not filter branches; every PR must emit the check")
+	}
+	if _, ok := triggerMap["paths"]; ok {
+		t.Fatal("required workflow must not filter paths; every PR must emit the check")
+	}
+	if _, ok := triggerMap["paths-ignore"]; ok {
+		t.Fatal("required workflow must not filter paths-ignore; every PR must emit the check")
+	}
+
+	typesVal, ok := triggerMap["types"]
+	if !ok {
+		t.Fatal("pull_request_target must declare event types")
+	}
+	rawTypes, ok := typesVal.([]any)
+	if !ok {
+		t.Fatalf("pull_request_target types has unexpected type %T", typesVal)
+	}
+	gotTypes := make([]string, 0, len(rawTypes))
+	for _, raw := range rawTypes {
+		typ, ok := raw.(string)
+		if !ok {
+			t.Fatalf("pull_request_target type entry has unexpected type %T", raw)
 		}
+		gotTypes = append(gotTypes, typ)
+	}
+	wantTypes := []string{"opened", "edited", "synchronize", "reopened"}
+	if !slices.Equal(gotTypes, wantTypes) {
+		t.Fatalf("pull_request_target types = %v, want %v", gotTypes, wantTypes)
+	}
+}
+
+// TestNoMistakesRequiredWorkflowUsesHostedRunner pins ubuntu-latest so the
+// canonical workflow never ships box-specific self-hosted runner labels.
+func TestNoMistakesRequiredWorkflowUsesHostedRunner(t *testing.T) {
+	workflow := loadRequiredWorkflow(t)
+	job, ok := workflow.Jobs["check"]
+	if !ok {
+		t.Fatal("required workflow missing check job")
+	}
+	if got, ok := job.RunsOn.(string); !ok || got != "ubuntu-latest" {
+		t.Fatalf("check runs-on = %#v, want %q", job.RunsOn, "ubuntu-latest")
+	}
+	if job.TimeoutMinutes != 5 {
+		t.Fatalf("check timeout-minutes = %d, want 5", job.TimeoutMinutes)
 	}
 }
 
@@ -178,11 +228,11 @@ func TestNoMistakesRequiredWorkflowPublishesStableEventIdentity(t *testing.T) {
 
 func TestNoMistakesRequiredWorkflowKeepsForkBoundaryReadOnly(t *testing.T) {
 	workflow := loadRequiredWorkflow(t)
-	if _, ok := workflow.On["pull_request"]; !ok {
-		t.Fatal("required workflow must retain the safe pull_request boundary")
+	if _, ok := workflow.On["pull_request_target"]; !ok {
+		t.Fatal("required workflow must use pull_request_target so the base branch copy always runs")
 	}
-	if _, ok := workflow.On["pull_request_target"]; ok {
-		t.Fatal("required workflow must not gain pull_request_target write authority")
+	if _, ok := workflow.On["pull_request"]; ok {
+		t.Fatal("required workflow must not use pull_request; that trigger lets a PR edit/delete the workflow and exempt itself")
 	}
 	if got := workflow.Permissions["contents"]; got != "read" {
 		t.Fatalf("contents permission = %q, want read", got)
@@ -220,8 +270,10 @@ type requiredWorkflowConcurrency struct {
 }
 
 type requiredWorkflowJob struct {
-	Name  string                 `yaml:"name"`
-	Steps []requiredWorkflowStep `yaml:"steps"`
+	Name           string                 `yaml:"name"`
+	RunsOn         any                    `yaml:"runs-on"`
+	TimeoutMinutes int                    `yaml:"timeout-minutes"`
+	Steps          []requiredWorkflowStep `yaml:"steps"`
 }
 
 type requiredWorkflowStep struct {
