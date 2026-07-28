@@ -1,19 +1,31 @@
 name: Require no-mistakes
 run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
+# Always-emitted, metadata-only gate. Every pull request must carry the
+# deterministic signature that no-mistakes writes into the PR body.
+#
+# Fork safety: the trigger is pull_request_target, so the workflow that runs is
+# always the base branch copy. A PR that edits or deletes this workflow cannot
+# exempt itself. There are no branch/path filters, so the check is emitted on
+# every PR and is safe to require.
+#
+# Bot exemptions: github-actions[bot], dependabot[bot], and release-please[bot]
+# are exempt so release automation and Dependabot keep working. Other authors
+# (human or bot) must raise PRs through `git push no-mistakes`.
+#
+# Least privilege: contents: read only, no secrets, no checkout, and no PR-head
+# code execution. The job reads only the PR body from the event payload.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, edited, synchronize, reopened]
-    branches:
-      - main
 
 permissions:
   contents: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
-# an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# an immutable per-event group so a queued run can never collapse an earlier
+# opened/edited check. Keep synchronize/reopened coalescing as before.
 concurrency:
   group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
   cancel-in-progress: true
@@ -22,9 +34,11 @@ jobs:
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # Known automation accounts are exempt so the release pipeline keeps working:
     # - github-actions[bot] opens the release-please PR via GITHUB_TOKEN
     # - dependabot[bot] opens dependency update PRs
+    # - release-please[bot] opens release PRs when that identity is used
     # Other authors (human or bot) must raise PRs through `git push no-mistakes`.
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&

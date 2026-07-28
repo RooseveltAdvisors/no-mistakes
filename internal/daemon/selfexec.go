@@ -236,17 +236,18 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 }
 
 func stopCurrentDaemonBeforeManagedRestart(p *paths.Paths) error {
+	stopping, _ := readDaemonPIDFile(p.PIDFile())
 	if managed, err := stopManagedService(p); managed && err != nil {
 		if alive, _ := daemonHealthCheck(p); !alive {
 			return nil
 		}
-		if detachedErr := stopDetachedDaemon(p); detachedErr != nil {
+		if detachedErr := stopDetachedDaemon(p, stopping); detachedErr != nil {
 			return fmt.Errorf("stop managed daemon before restart: %w; detached shutdown: %v", err, detachedErr)
 		}
 		return nil
 	}
 	if alive, _ := daemonHealthCheck(p); alive {
-		if err := stopDetachedDaemon(p); err != nil {
+		if err := stopDetachedDaemon(p, stopping); err != nil {
 			return fmt.Errorf("stop existing daemon before managed restart: %w", err)
 		}
 	}
@@ -537,22 +538,26 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
 func Stop(p *paths.Paths) error {
+	// Capture the live daemon's identity before requesting shutdown: the
+	// daemon removes its own pid file while exiting, and waitForDaemonStop
+	// still has to wait for that exact process to be gone.
+	stopping, _ := readDaemonPIDFile(p.PIDFile())
 	if managed, err := stopManagedService(p); managed {
 		if err != nil {
 			if alive, _ := daemonHealthCheck(p); !alive {
 				return nil
 			}
-			if detachedErr := stopDetachedDaemon(p); detachedErr != nil {
+			if detachedErr := stopDetachedDaemon(p, stopping); detachedErr != nil {
 				return fmt.Errorf("%w; detached shutdown: %v", err, detachedErr)
 			}
 			return nil
 		}
-		return waitForDaemonStop(p)
+		return waitForDaemonStop(p, stopping)
 	}
-	return stopDetachedDaemon(p)
+	return stopDetachedDaemon(p, stopping)
 }
 
-func stopDetachedDaemon(p *paths.Paths) error {
+func stopDetachedDaemon(p *paths.Paths, stopping daemonPIDFile) error {
 	client, err := daemonDial(p.Socket())
 	if err != nil {
 		stale, staleErr := staleDaemonArtifacts(p)
@@ -571,10 +576,16 @@ func stopDetachedDaemon(p *paths.Paths) error {
 	defer client.Close()
 
 	var result ipc.ShutdownResult
-	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result); err != nil {
-		return fmt.Errorf("shutdown request: %w", err)
+	callErr := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result)
+	// Release the shutdown connection before waiting for the daemon to go away.
+	// The daemon's accept loop drains in-flight connections (ipc wg.Wait) before
+	// the process can exit, so holding this one open while waiting deadlocks the
+	// wait against the very exit it is waiting for.
+	_ = client.Close()
+	if callErr != nil {
+		return fmt.Errorf("shutdown request: %w", callErr)
 	}
-	return waitForDaemonStop(p)
+	return waitForDaemonStop(p, stopping)
 }
 
 func stopDetachedDaemonByPID(p *paths.Paths) error {
@@ -691,12 +702,13 @@ func daemonSocketAcceptingConnections(path string) (bool, error) {
 	return true, nil
 }
 
-func waitForDaemonStop(p *paths.Paths) error {
-	// Wait for daemon to actually stop (socket becomes unavailable).
+func waitForDaemonStop(p *paths.Paths, stopping daemonPIDFile) error {
+	// Wait for the daemon to actually stop: the socket must be unavailable
+	// AND the process must be gone (see stoppingDaemonStillRunning).
 	deadline := time.Now().Add(daemonStopTimeout())
 	for time.Now().Before(deadline) {
 		alive, err := daemonHealthCheck(p)
-		if err == nil && !alive {
+		if err == nil && !alive && !stoppingDaemonStillRunning(stopping) {
 			cleanupDaemonArtifacts(p)
 			slog.Info("daemon stopped gracefully")
 			return nil
@@ -705,32 +717,72 @@ func waitForDaemonStop(p *paths.Paths) error {
 	}
 
 	// Try to kill by PID as last resort.
-	if pid, err := ReadPID(p); err == nil {
+	pid, readErr := ReadPID(p)
+	switch {
+	case readErr == nil:
 		if err := validateDaemonPIDFallback(p, pid); err != nil {
 			return err
 		}
-		slog.Warn("daemon did not stop gracefully, killing", "pid", pid)
-		if err := daemonKillPID(pid); err != nil {
-			return fmt.Errorf("kill daemon pid %d: %w", pid, err)
-		}
-
-		killDeadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(killDeadline) {
-			running, err := daemonProcessRunning(pid)
-			if err != nil {
-				return err
-			}
-			if !running {
-				cleanupDaemonArtifacts(p)
-				slog.Warn("daemon killed after shutdown timeout", "pid", pid)
-				return nil
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		return fmt.Errorf("daemon pid %d still running after kill", pid)
+	case stoppingDaemonStillRunning(stopping):
+		// The daemon already removed its pid file but has not exited, so it
+		// still holds the singleton lock. Kill the exact instance we were
+		// asked to stop.
+		pid = stopping.PID
+	default:
+		return fmt.Errorf("daemon did not stop within timeout")
 	}
 
-	return fmt.Errorf("daemon did not stop within timeout")
+	slog.Warn("daemon did not stop gracefully, killing", "pid", pid)
+	if err := daemonKillPID(pid); err != nil {
+		return fmt.Errorf("kill daemon pid %d: %w", pid, err)
+	}
+
+	killDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(killDeadline) {
+		running, err := daemonProcessRunning(pid)
+		if err != nil {
+			return err
+		}
+		if !running {
+			cleanupDaemonArtifacts(p)
+			slog.Warn("daemon killed after shutdown timeout", "pid", pid)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon pid %d still running after kill", pid)
+}
+
+// stoppingDaemonStillRunning reports whether the exact daemon instance captured
+// before shutdown is still alive.
+//
+// The IPC socket dies at the start of the daemon's shutdown, but the singleton
+// lock (lock.go) is released only when the process actually exits - after run
+// drain, telemetry flush, and log close. Treating "socket gone" as "stopped"
+// therefore lets `daemon restart` launch the next daemon into a lock the old
+// one still holds, and the child exits immediately with
+// "daemon child N exited before readiness: exit status 1".
+//
+// An in-process daemon (a test driving RunWithResources in a goroutine) records
+// our own pid, which never exits while we wait; that case reports not-running so
+// the shutdown wait keeps its socket-only semantics there.
+func stoppingDaemonStillRunning(record daemonPIDFile) bool {
+	if record.PID <= 0 || record.PID == os.Getpid() {
+		return false
+	}
+	running, err := daemonProcessRunning(record.PID)
+	if err != nil || !running {
+		return false
+	}
+	if record.StartedAt.IsZero() {
+		return true
+	}
+	startedAt, err := daemonProcessStartTime(record.PID)
+	if err != nil {
+		return false
+	}
+	// A recycled pid belongs to an unrelated process: the daemon is gone.
+	return startedAt.UTC().Equal(record.StartedAt.UTC())
 }
 
 func cleanupDaemonArtifacts(p *paths.Paths) {

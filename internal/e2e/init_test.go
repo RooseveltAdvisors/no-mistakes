@@ -271,7 +271,13 @@ func TestInitRollsBackWhenDaemonStartFails(t *testing.T) {
 	if strings.Contains(out, "rollback init:") {
 		t.Fatalf("rollback should succeed cleanly, got wrapped error output: %q", out)
 	}
-	if elapsed >= time.Second {
+	// The invariant is that the failure path honors the test-scoped start
+	// timeout above instead of blocking on the 45s production readiness budget
+	// (daemonStartTimeout in internal/daemon/selfexec.go). The bound is
+	// generous because `elapsed` covers the whole init subprocess -
+	// gate provisioning, DB migrations, rollback - whose cost varies with CI
+	// load; a tight bound measures the runner, not the timeout wiring.
+	if elapsed >= 15*time.Second {
 		t.Fatalf("init rollback should fail fast in tests, took %v", elapsed)
 	}
 
