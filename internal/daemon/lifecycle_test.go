@@ -59,7 +59,7 @@ func TestWaitForDaemonStopKeepsArtifactsWhenKillFails(t *testing.T) {
 	}()
 
 	started := time.Now()
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonPIDFile{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail when kill fails")
 	}
@@ -285,7 +285,7 @@ func TestStopDetachedDaemonFallsBackToPIDWhenSocketIsBroken(t *testing.T) {
 		daemonKillPID = originalKillPID
 	}()
 
-	if err := stopDetachedDaemon(p); err != nil {
+	if err := stopDetachedDaemon(p, daemonPIDFile{}); err != nil {
 		t.Fatalf("expected stopDetachedDaemon to stop live pid when IPC dial fails, got %v", err)
 	}
 	if killedPID != pid {
@@ -341,7 +341,7 @@ func TestStopDetachedDaemonRejectsStalePIDFallback(t *testing.T) {
 		daemonKillPID = originalKillPID
 	}()
 
-	err = stopDetachedDaemon(p)
+	err = stopDetachedDaemon(p, daemonPIDFile{})
 	if err == nil {
 		t.Fatal("expected stale pid fallback to fail")
 	}
@@ -405,7 +405,7 @@ func TestStopDetachedDaemonRejectsUnrelatedLiveProcessPIDFallback(t *testing.T) 
 		daemonKillPID = originalKillPID
 	}()
 
-	err = stopDetachedDaemon(p)
+	err = stopDetachedDaemon(p, daemonPIDFile{})
 	if err == nil {
 		t.Fatal("expected unrelated live process pid fallback to fail")
 	}
@@ -664,7 +664,7 @@ func TestStopDetachedDaemonRemovesArtifactsForDeadPID(t *testing.T) {
 		daemonDial = originalDial
 	}()
 
-	if err := stopDetachedDaemon(p); err != nil {
+	if err := stopDetachedDaemon(p, daemonPIDFile{}); err != nil {
 		t.Fatalf("expected stopDetachedDaemon to clean stale artifacts, got %v", err)
 	}
 	if _, statErr := os.Stat(p.PIDFile()); !os.IsNotExist(statErr) {
@@ -760,7 +760,7 @@ func TestStopDetachedDaemonKeepsArtifactsWhenPIDMissingButDaemonLooksLive(t *tes
 	defer func() {
 		daemonDial = originalDial
 	}()
-	err = stopDetachedDaemon(p)
+	err = stopDetachedDaemon(p, daemonPIDFile{})
 	if err == nil {
 		t.Fatal("expected stopDetachedDaemon to fail without a pid file")
 	}
@@ -885,7 +885,7 @@ func TestWaitForDaemonStopNeverKillsOwnPIDWhenHealthCheckOnlyErrors(t *testing.T
 		daemonKillPID = originalKillPID
 	}()
 
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonPIDFile{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail rather than kill our own pid")
 	}
@@ -924,7 +924,7 @@ func TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped(t *testing.T) {
 	}()
 
 	started := time.Now()
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonPIDFile{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail when health checks only error")
 	}
@@ -983,7 +983,7 @@ func TestWaitForDaemonStopRejectsStalePIDBeforeKill(t *testing.T) {
 	}()
 
 	started := time.Now()
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonPIDFile{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail for stale pid")
 	}

@@ -67,27 +67,41 @@ func TestDetectProvider_SSHHostAlias(t *testing.T) {
 	t.Setenv("GLAB_CONFIG_DIR", t.TempDir())
 	t.Setenv("GH_CONFIG_DIR", t.TempDir())
 
+	// goos is pinned per case because a single-letter scp alias ("g:owner/repo")
+	// is spelled exactly like a Windows drive-relative path ("g:owner\repo"), so
+	// the two platforms must classify it differently.
 	tests := []struct {
 		name     string
 		url      string
+		goos     string
 		hostname string
 		want     Provider
 	}{
 		{
 			name:     "GitHub scp remote",
 			url:      "git@github-personal:owner/repo.git",
+			goos:     "linux",
 			hostname: "github.com",
 			want:     ProviderGitHub,
 		},
 		{
 			name:     "GitHub single-letter scp alias",
 			url:      "g:owner/repo.git",
+			goos:     "linux",
 			hostname: "github.com",
 			want:     ProviderGitHub,
 		},
 		{
+			name:     "GitHub single-letter scp alias on Windows is a drive path",
+			url:      "g:owner/repo.git",
+			goos:     "windows",
+			hostname: "github.com",
+			want:     ProviderUnknown,
+		},
+		{
 			name:     "GitLab SSH URL",
 			url:      "ssh://git@gitlab-work/group/repo.git",
+			goos:     "linux",
 			hostname: "gitlab.com",
 			want:     ProviderGitLab,
 		},
@@ -95,11 +109,11 @@ func TestDetectProvider_SSHHostAlias(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := detectProvider(context.Background(), tt.url, func(context.Context, string) (string, error) {
+			got := detectProviderForGOOS(context.Background(), tt.url, func(context.Context, string) (string, error) {
 				return tt.hostname, nil
-			})
+			}, tt.goos)
 			if got != tt.want {
-				t.Fatalf("detectProvider(%q) = %q, want %q", tt.url, got, tt.want)
+				t.Fatalf("detectProviderForGOOS(%q, %q) = %q, want %q", tt.url, tt.goos, got, tt.want)
 			}
 		})
 	}
