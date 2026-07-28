@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -275,18 +276,51 @@ type subscriptionCandidateRaw struct {
 // Selection is intentionally run-scoped (not per invocation) so review/fixer
 // session continuity is preserved for session-capable backends.
 type SubscriptionRoute struct {
-	Ordered   []RoutedSubscriptionCandidate
-	Decisions []quota.Decision
-	Summary   string
+	Ordered   []RoutedSubscriptionCandidate `json:"ordered"`
+	Decisions []quota.Decision              `json:"decisions"`
+	Summary   string                        `json:"summary"`
 }
 
 // RoutedSubscriptionCandidate is one launchable entry in a SubscriptionRoute.
 type RoutedSubscriptionCandidate struct {
-	Name          string
-	Agent         types.AgentName
-	Args          []string
-	QuotaProvider string
-	Reason        string
+	Name          string          `json:"name"`
+	Agent         types.AgentName `json:"agent"`
+	Args          []string        `json:"args,omitempty"`
+	QuotaProvider string          `json:"quota_provider"`
+	Reason        string          `json:"reason"`
+}
+
+func (c *Config) MarshalSubscriptionRoute() (string, error) {
+	if c.SubscriptionRoute == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(c.SubscriptionRoute)
+	if err != nil {
+		return "", fmt.Errorf("marshal subscription route: %w", err)
+	}
+	return string(data), nil
+}
+
+func (c *Config) RestoreSubscriptionRoute(data string) error {
+	var route SubscriptionRoute
+	if err := json.Unmarshal([]byte(data), &route); err != nil {
+		return fmt.Errorf("restore subscription route: %w", err)
+	}
+	if len(route.Ordered) == 0 {
+		return fmt.Errorf("restore subscription route: route is empty")
+	}
+	agents := make([]types.AgentName, 0, len(route.Ordered))
+	for _, candidate := range route.Ordered {
+		if candidate.Name == "" || candidate.Agent == "" ||
+			candidate.Agent == types.AgentSubscription || candidate.Agent == types.AgentAuto {
+			return fmt.Errorf("restore subscription route: invalid candidate")
+		}
+		agents = append(agents, candidate.Agent)
+	}
+	c.SubscriptionRoute = &route
+	c.Agent = route.Ordered[0].Agent
+	c.Agents = agents
+	return nil
 }
 
 // EffectiveArgs returns the extra CLI args for this candidate.

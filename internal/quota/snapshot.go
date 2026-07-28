@@ -19,7 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
-// Snapshot is the subset of quota-axi --json schemaVersion 3 used for routing.
+// Snapshot is the normalized subset of quota-axi --json used for routing.
 type Snapshot struct {
 	GeneratedAt   string             `json:"generatedAt"`
 	SchemaVersion int                `json:"schemaVersion"`
@@ -30,7 +30,13 @@ type Snapshot struct {
 type ProviderSnapshot struct {
 	Provider       string         `json:"provider"`
 	State          ProviderState  `json:"state"`
+	Windows        []QuotaWindow  `json:"windows,omitempty"`
 	QuotaSemantics QuotaSemantics `json:"quotaSemantics"`
+}
+
+type QuotaWindow struct {
+	ID               string   `json:"id"`
+	PercentRemaining *float64 `json:"percentRemaining"`
 }
 
 // ProviderState is the freshness / auth state of a provider report.
@@ -110,10 +116,49 @@ func ParseSnapshot(data []byte) (*Snapshot, error) {
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return nil, fmt.Errorf("parse quota-axi json: %w", err)
 	}
-	if snap.SchemaVersion != 0 && snap.SchemaVersion != 3 {
-		return nil, fmt.Errorf("unsupported quota-axi schemaVersion %d (want 3)", snap.SchemaVersion)
+	if snap.SchemaVersion != 0 && snap.SchemaVersion != 2 && snap.SchemaVersion != 3 {
+		return nil, fmt.Errorf("unsupported quota-axi schemaVersion %d (want 2 or 3)", snap.SchemaVersion)
+	}
+	if snap.SchemaVersion == 2 {
+		normalizeV2(&snap)
 	}
 	return &snap, nil
+}
+
+func normalizeV2(snap *Snapshot) {
+	for i := range snap.Providers {
+		provider := &snap.Providers[i]
+		availability := make([]EffectiveAvailability, 0, len(provider.Windows)+1)
+		var minimum *float64
+		for _, window := range provider.Windows {
+			if window.PercentRemaining == nil {
+				continue
+			}
+			value := *window.PercentRemaining
+			availability = append(availability, EffectiveAvailability{
+				Scope: window.ID, Status: "known",
+				EffectivePercentRemaining: quotaFloatPtr(value),
+				Pace:                      &Pace{Status: "unknown"},
+			})
+			if minimum == nil || value < *minimum {
+				minimum = quotaFloatPtr(value)
+			}
+		}
+		if minimum == nil {
+			provider.QuotaSemantics = QuotaSemantics{Status: "unknown"}
+			continue
+		}
+		availability = append([]EffectiveAvailability{{
+			Scope: "all_models", Status: "known",
+			EffectivePercentRemaining: minimum,
+			Pace:                      &Pace{Status: "unknown"},
+		}}, availability...)
+		provider.QuotaSemantics = QuotaSemantics{Status: "known", EffectiveAvailability: availability}
+	}
+}
+
+func quotaFloatPtr(value float64) *float64 {
+	return &value
 }
 
 // FetchFunc loads one fresh quota-axi snapshot. Tests inject fakes.

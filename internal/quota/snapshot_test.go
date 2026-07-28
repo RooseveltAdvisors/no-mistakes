@@ -19,8 +19,51 @@ func TestParseSnapshot_SchemaVersion(t *testing.T) {
 	if snap.SchemaVersion != 3 {
 		t.Fatalf("SchemaVersion = %d", snap.SchemaVersion)
 	}
-	if _, err := ParseSnapshot([]byte(`{"schemaVersion":2,"providers":[]}`)); err == nil {
-		t.Fatal("expected schemaVersion 2 to fail")
+	if _, err := ParseSnapshot([]byte(`{"schemaVersion":4,"providers":[]}`)); err == nil {
+		t.Fatal("expected schemaVersion 4 to fail")
+	}
+}
+
+func TestParseSnapshot_SchemaVersion2NormalizesBindingHeadroom(t *testing.T) {
+	snap, err := ParseSnapshot([]byte(`{"schemaVersion":2,"providers":[{
+		"provider":"codex",
+		"windows":[
+			{"id":"five_hour","percentRemaining":82},
+			{"id":"weekly","percentRemaining":47},
+			{"id":"model:gpt-special:5h","percentRemaining":12}
+		],
+		"state":{"status":"fresh","stale":false}
+	}]}`))
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	sel := Select([]Candidate{{
+		Name: "codex", Agent: types.AgentCodex, QuotaProvider: "codex", Runnable: true,
+	}}, snap, nil)
+	if got := sel.Ordered[0].Remaining; got == nil || *got != 12 {
+		t.Fatalf("binding remaining = %v, want 12", got)
+	}
+	if sel.Ordered[0].Pace != "unknown" {
+		t.Fatalf("pace = %q, want unknown", sel.Ordered[0].Pace)
+	}
+}
+
+func TestParseSnapshot_SchemaVersion2PreservesStaleAndUnknown(t *testing.T) {
+	snap, err := ParseSnapshot([]byte(`{"schemaVersion":2,"providers":[
+		{"provider":"kimi","windows":[{"id":"weekly","percentRemaining":99}],"state":{"status":"stale","stale":true}},
+		{"provider":"grok","windows":[],"state":{"status":"fresh","stale":false}}
+	]}`))
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	sel := Select([]Candidate{
+		{Name: "kimi", Agent: types.AgentPi, QuotaProvider: "kimi", Runnable: true},
+		{Name: "grok", Agent: types.AgentPi, QuotaProvider: "grok", Runnable: true},
+	}, snap, nil)
+	for _, decision := range sel.Decisions {
+		if decision.RankGroup != 2 || decision.Remaining != nil {
+			t.Fatalf("%s was treated as healthy: %+v", decision.Name, decision)
+		}
 	}
 }
 

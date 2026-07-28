@@ -242,6 +242,30 @@ func TestResolveAgent_SubscriptionNotMixedIntoFallbackList(t *testing.T) {
 	}
 }
 
+func TestSubscriptionRouteRoundTripPreservesRunScopedOrder(t *testing.T) {
+	original := &Config{SubscriptionRoute: &SubscriptionRoute{
+		Ordered: []RoutedSubscriptionCandidate{
+			{Name: "grok", Agent: types.AgentPi, Args: []string{"--provider", "grok"}, QuotaProvider: "grok", Reason: "preferred"},
+			{Name: "codex", Agent: types.AgentCodex, QuotaProvider: "codex", Reason: "fallback"},
+		},
+		Summary: "grok then codex",
+	}}
+	data, err := original.MarshalSubscriptionRoute()
+	if err != nil {
+		t.Fatalf("MarshalSubscriptionRoute: %v", err)
+	}
+	restored := &Config{}
+	if err := restored.RestoreSubscriptionRoute(data); err != nil {
+		t.Fatalf("RestoreSubscriptionRoute: %v", err)
+	}
+	if restored.Agent != types.AgentPi ||
+		len(restored.SubscriptionRoute.Ordered) != 2 ||
+		restored.SubscriptionRoute.Ordered[0].Name != "grok" ||
+		restored.SubscriptionRoute.Ordered[1].Name != "codex" {
+		t.Fatalf("restored route changed order: %+v", restored.SubscriptionRoute)
+	}
+}
+
 func TestMerge_RepoAgentOverridesSubscriptionMode(t *testing.T) {
 	global := &GlobalConfig{
 		Agent: types.AgentSubscription,

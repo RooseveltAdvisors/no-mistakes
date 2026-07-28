@@ -142,6 +142,11 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
+	if run.ResolvedAgentRoute != nil {
+		if err := cfg.RestoreSubscriptionRoute(*run.ResolvedAgentRoute); err != nil {
+			return nil, err
+		}
+	}
 	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
 	if err != nil {
 		return nil, err
@@ -217,8 +222,10 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 	if steps.IsDemoMode() {
 		return agent.NewNoop(), nil
 	}
-	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
-		return nil, err
+	if cfg.SubscriptionRoute == nil {
+		if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
+			return nil, err
+		}
 	}
 	created, err := createResolvedPipelineAgents(cfg)
 	if err != nil {
@@ -796,6 +803,20 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			m.db.UpdateRunError(run.ID, err.Error())
 			trackStartFailure("resolve_agent")
 			return "", err
+		}
+		route, routeErr := cfg.MarshalSubscriptionRoute()
+		if routeErr != nil {
+			m.db.UpdateRunError(run.ID, routeErr.Error())
+			trackStartFailure("persist_agent_route")
+			return "", routeErr
+		}
+		if route != "" {
+			if err := m.db.UpdateRunResolvedAgentRoute(run.ID, route); err != nil {
+				m.db.UpdateRunError(run.ID, err.Error())
+				trackStartFailure("persist_agent_route")
+				return "", err
+			}
+			run.ResolvedAgentRoute = &route
 		}
 		created, agErr := createResolvedPipelineAgents(cfg)
 		if agErr != nil {

@@ -103,6 +103,29 @@ func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	}
 }
 
+func TestRunResolvedAgentRouteRoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/route-repo", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatalf("InsertRepo: %v", err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature/route", "head", "base")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	route := `{"ordered":[{"name":"grok","agent":"pi","quota_provider":"grok"}]}`
+	if err := d.UpdateRunResolvedAgentRoute(run.ID, route); err != nil {
+		t.Fatalf("UpdateRunResolvedAgentRoute: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.ResolvedAgentRoute == nil || *got.ResolvedAgentRoute != route {
+		t.Fatalf("ResolvedAgentRoute = %v, want %q", got.ResolvedAgentRoute, route)
+	}
+}
+
 func TestRunGetNotFound(t *testing.T) {
 	d := openTestDB(t)
 	got, err := d.GetRun("nonexistent")
