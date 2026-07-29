@@ -7,6 +7,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/quota"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -92,3 +93,83 @@ func TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember(t *testing.T
 		_ = ag.Close()
 	}
 }
+
+// TestNewPipelineAgent_SubscriptionRouteBuildsLabeledCandidates proves run-start
+// subscription routing constructs ordered labeled backends with per-candidate args
+// and never requires Claude when it is absent from the route.
+func TestNewPipelineAgent_SubscriptionRouteBuildsLabeledCandidates(t *testing.T) {
+	rem := 90.0
+	cfg := &config.Config{
+		Agent: types.AgentSubscription,
+		SubscriptionAgents: config.SubscriptionAgentsConfig{
+			Candidates: []config.SubscriptionCandidate{
+				{Name: "kimi", Agent: types.AgentPi, QuotaProvider: "kimi", Provider: "kimi-coding", Model: "k3"},
+				{Name: "codex", Agent: types.AgentCodex, QuotaProvider: "codex"},
+			},
+		},
+		QuotaFetch: func(context.Context, string, []string) (*quota.Snapshot, error) {
+			return &quota.Snapshot{
+				SchemaVersion: 3,
+				Providers: []quota.ProviderSnapshot{
+					{
+						Provider: "claude",
+						State:    quota.ProviderState{Status: "fresh"},
+						QuotaSemantics: quota.QuotaSemantics{
+							Status: "known",
+							EffectiveAvailability: []quota.EffectiveAvailability{{
+								Scope: "all_models", Status: "known", EffectivePercentRemaining: float64Ptr(99), Pace: &quota.Pace{Status: "behind"},
+							}},
+						},
+					},
+					{
+						Provider: "kimi",
+						State:    quota.ProviderState{Status: "fresh"},
+						QuotaSemantics: quota.QuotaSemantics{
+							Status: "known",
+							EffectiveAvailability: []quota.EffectiveAvailability{{
+								Scope: "all_models", Status: "known", EffectivePercentRemaining: float64Ptr(40), Pace: &quota.Pace{Status: "on_pace"},
+							}},
+						},
+					},
+					{
+						Provider: "codex",
+						State:    quota.ProviderState{Status: "fresh"},
+						QuotaSemantics: quota.QuotaSemantics{
+							Status: "known",
+							EffectiveAvailability: []quota.EffectiveAvailability{{
+								Scope: "all_models", Status: "known", EffectivePercentRemaining: &rem, Pace: &quota.Pace{Status: "behind"},
+							}},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+	ag, err := newPipelineAgent(context.Background(), cfg, fakeLookPath)
+	if err != nil {
+		t.Fatalf("newPipelineAgent: %v", err)
+	}
+	defer ag.Close()
+	if ag.Name() != "codex" {
+		t.Fatalf("fallback Name() = %q, want codex label", ag.Name())
+	}
+	if cfg.SubscriptionRoute == nil || len(cfg.SubscriptionRoute.Ordered) != 2 {
+		t.Fatalf("route = %+v", cfg.SubscriptionRoute)
+	}
+	if cfg.SubscriptionRoute.Ordered[0].Name != "codex" || cfg.SubscriptionRoute.Ordered[1].Name != "kimi" {
+		t.Fatalf("ordered = %+v", cfg.SubscriptionRoute.Ordered)
+	}
+	for _, d := range cfg.SubscriptionRoute.Decisions {
+		if d.Name == "claude" {
+			t.Fatalf("claude entered route decisions: %+v", d)
+		}
+	}
+	if !agent.SupportsSessionProvider(ag, "codex") {
+		t.Fatal("subscription codex candidate must still expose backend session provider")
+	}
+	if agent.SupportsSessionProvider(ag, "claude") {
+		t.Fatal("claude must not appear as a session provider when absent from the route")
+	}
+}
+
+func float64Ptr(v float64) *float64 { return &v }

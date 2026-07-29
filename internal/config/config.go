@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/quota"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
@@ -53,10 +55,14 @@ type GlobalConfig struct {
 	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
-	CITimeout            time.Duration       `yaml:"-"`
-	StepQuietWarning     time.Duration       `yaml:"-"`
-	DaemonConnectTimeout time.Duration       `yaml:"-"`
-	LogLevel             string              `yaml:"log_level"`
+	// SubscriptionAgents names the only candidates considered when agent is
+	// "subscription". Global-only; never inherits Claude or any other provider
+	// that is not explicitly listed.
+	SubscriptionAgents   SubscriptionAgentsConfig `yaml:"-"`
+	CITimeout            time.Duration            `yaml:"-"`
+	StepQuietWarning     time.Duration            `yaml:"-"`
+	DaemonConnectTimeout time.Duration            `yaml:"-"`
+	LogLevel             string                   `yaml:"log_level"`
 	// SessionReuse controls per-run, per-role agent session reuse in the
 	// review loop (one durable reviewer session across full reviews, a
 	// separate durable fixer session across fix turns). Default true; set
@@ -70,21 +76,22 @@ type GlobalConfig struct {
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
 type globalConfigRaw struct {
-	Agent                agentList           `yaml:"agent"`
-	ACPXPath             string              `yaml:"acpx_path"`
-	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
-	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
-	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
-	CITimeout            string              `yaml:"ci_timeout"`
-	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
-	BabysitTimeout       string              `yaml:"babysit_timeout"`
-	StepQuietWarning     string              `yaml:"step_quiet_warning"`
-	LogLevel             string              `yaml:"log_level"`
-	SessionReuse         *bool               `yaml:"session_reuse"`
-	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
-	Commit               CommitRaw           `yaml:"commit"`
-	Intent               IntentRaw           `yaml:"intent"`
-	Test                 TestRaw             `yaml:"test"`
+	Agent                agentList              `yaml:"agent"`
+	ACPXPath             string                 `yaml:"acpx_path"`
+	ACPRegistryOverrides map[string]string      `yaml:"acp_registry_overrides"`
+	AgentPathOverride    map[string]string      `yaml:"agent_path_override"`
+	AgentArgsOverride    map[string][]string    `yaml:"agent_args_override"`
+	SubscriptionAgents   *subscriptionAgentsRaw `yaml:"subscription_agents"`
+	CITimeout            string                 `yaml:"ci_timeout"`
+	DaemonConnectTimeout string                 `yaml:"daemon_connect_timeout"`
+	BabysitTimeout       string                 `yaml:"babysit_timeout"`
+	StepQuietWarning     string                 `yaml:"step_quiet_warning"`
+	LogLevel             string                 `yaml:"log_level"`
+	SessionReuse         *bool                  `yaml:"session_reuse"`
+	AutoFix              AutoFixRaw             `yaml:"auto_fix"`
+	Commit               CommitRaw              `yaml:"commit"`
+	Intent               IntentRaw              `yaml:"intent"`
+	Test                 TestRaw                `yaml:"test"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -200,22 +207,149 @@ type Config struct {
 	ACPRegistryOverrides map[string]string
 	AgentPathOverride    map[string]string
 	AgentArgsOverride    map[string][]string
-	CITimeout            time.Duration
-	StepQuietWarning     time.Duration
-	LogLevel             string
-	SessionReuse         bool
-	Commands             Commands
-	IgnorePatterns       []string
-	AutoFix              AutoFix
-	Commit               Commit
-	Intent               Intent
-	Test                 Test
-	Document             Document
+	// SubscriptionAgents is the global-only candidate set for agent: subscription.
+	SubscriptionAgents SubscriptionAgentsConfig
+	// SubscriptionRoute is filled by ResolveAgent when agent is subscription.
+	// It is the ordered, inspectable run-start selection among named candidates.
+	SubscriptionRoute *SubscriptionRoute
+	// QuotaFetch, when non-nil, replaces quota-axi process execution. Tests only.
+	QuotaFetch       quota.FetchFunc `json:"-" yaml:"-"`
+	CITimeout        time.Duration
+	StepQuietWarning time.Duration
+	LogLevel         string
+	SessionReuse     bool
+	Commands         Commands
+	IgnorePatterns   []string
+	AutoFix          AutoFix
+	Commit           Commit
+	Intent           Intent
+	Test             Test
+	Document         Document
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
 	// RepoConfig field). When true, gate agents are launched with their
 	// project-level settings/instructions suppressed; the daemon fails the run
 	// closed if the resolved harness has no verified suppression knob.
 	DisableProjectSettings bool
+}
+
+// SubscriptionAgentsConfig is the global-only surface for quota-backed routing.
+type SubscriptionAgentsConfig struct {
+	// QuotaAXIPath is the quota-axi binary. Empty means "quota-axi" on PATH.
+	QuotaAXIPath string
+	Candidates   []SubscriptionCandidate
+}
+
+// SubscriptionCandidate is one named subscription-backed backend identity.
+type SubscriptionCandidate struct {
+	// Name is the unique operator label (kimi, codex, grok, ...).
+	Name string
+	// Agent is the native backend (pi, codex, claude, ...). Required.
+	Agent types.AgentName
+	// QuotaProvider is the quota-axi provider id (kimi, codex, grok, ...).
+	QuotaProvider string
+	// Args are candidate-specific extra CLI flags. When empty, provider/model
+	// sugar is expanded when set; otherwise agent_args_override for Agent applies.
+	Args []string
+	// Provider is optional Pi --provider sugar when Args is empty.
+	Provider string
+	// Model is optional model sugar (--model for pi, -m for codex) when Args is empty,
+	// and a hint for model-scoped quota availability rows.
+	Model string
+}
+
+// subscriptionAgentsRaw is the on-disk YAML form of subscription_agents.
+type subscriptionAgentsRaw struct {
+	QuotaAXIPath string                     `yaml:"quota_axi_path"`
+	Candidates   []subscriptionCandidateRaw `yaml:"candidates"`
+}
+
+type subscriptionCandidateRaw struct {
+	Name          string   `yaml:"name"`
+	Agent         string   `yaml:"agent"`
+	QuotaProvider string   `yaml:"quota_provider"`
+	Args          []string `yaml:"args"`
+	Provider      string   `yaml:"provider"`
+	Model         string   `yaml:"model"`
+}
+
+// SubscriptionRoute is the run-start quota selection among configured candidates.
+// Selection is intentionally run-scoped (not per invocation) so review/fixer
+// session continuity is preserved for session-capable backends.
+type SubscriptionRoute struct {
+	Ordered   []RoutedSubscriptionCandidate `json:"ordered"`
+	Decisions []quota.Decision              `json:"decisions"`
+	Summary   string                        `json:"summary"`
+}
+
+// RoutedSubscriptionCandidate is one launchable entry in a SubscriptionRoute.
+type RoutedSubscriptionCandidate struct {
+	Name          string          `json:"name"`
+	Agent         types.AgentName `json:"agent"`
+	Args          []string        `json:"args,omitempty"`
+	QuotaProvider string          `json:"quota_provider"`
+	Reason        string          `json:"reason"`
+}
+
+func (c *Config) MarshalSubscriptionRoute() (string, error) {
+	if c.SubscriptionRoute == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(c.SubscriptionRoute)
+	if err != nil {
+		return "", fmt.Errorf("marshal subscription route: %w", err)
+	}
+	return string(data), nil
+}
+
+func (c *Config) RestoreSubscriptionRoute(data string) error {
+	var route SubscriptionRoute
+	if err := json.Unmarshal([]byte(data), &route); err != nil {
+		return fmt.Errorf("restore subscription route: %w", err)
+	}
+	if len(route.Ordered) == 0 {
+		return fmt.Errorf("restore subscription route: route is empty")
+	}
+	agents := make([]types.AgentName, 0, len(route.Ordered))
+	for _, candidate := range route.Ordered {
+		if candidate.Name == "" || candidate.Agent == "" ||
+			candidate.Agent == types.AgentSubscription || candidate.Agent == types.AgentAuto {
+			return fmt.Errorf("restore subscription route: invalid candidate")
+		}
+		agents = append(agents, candidate.Agent)
+	}
+	c.SubscriptionRoute = &route
+	c.Agent = route.Ordered[0].Agent
+	c.Agents = agents
+	return nil
+}
+
+// EffectiveArgs returns the extra CLI args for this candidate.
+func (c SubscriptionCandidate) EffectiveArgs(globalOverride []string) []string {
+	if len(c.Args) > 0 {
+		out := make([]string, len(c.Args))
+		copy(out, c.Args)
+		return out
+	}
+	if c.Provider != "" || c.Model != "" {
+		var out []string
+		if c.Provider != "" {
+			out = append(out, "--provider", c.Provider)
+		}
+		if c.Model != "" {
+			if c.Agent == types.AgentCodex {
+				out = append(out, "-m", c.Model)
+			} else {
+				out = append(out, "--model", c.Model)
+			}
+		}
+		return out
+	}
+	if len(globalOverride) == 0 {
+		return nil
+	}
+	out := make([]string, len(globalOverride))
+	copy(out, globalOverride)
+	return out
 }
 
 // Document is the resolved document-step config. Instructions come from the
@@ -320,12 +454,32 @@ const defaultConfigYAML = `# no-mistakes global configuration
 
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, claude]
-# Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
+# Options: auto, subscription, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
 # "auto" detects the first available native agent or ACP alias on your system
+# "subscription" ranks only subscription_agents.candidates via one fresh quota-axi
+# snapshot at run start (never adds Claude or any unlisted provider implicitly)
 # "cursor" is an ACP alias for acp:cursor using cursor-agent acp via acpx
 # "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
+
+# Quota-backed subscription candidates (global only). Used when agent: subscription.
+# subscription_agents:
+#   quota_axi_path: quota-axi
+#   candidates:
+#     - name: kimi
+#       agent: pi
+#       quota_provider: kimi
+#       provider: kimi-coding
+#       model: k3
+#     - name: codex
+#       agent: codex
+#       quota_provider: codex
+#     - name: grok
+#       agent: pi
+#       quota_provider: grok
+#       provider: xai
+#       model: grok-4.5
 
 # Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
 # acpx_path: acpx
@@ -474,9 +628,13 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 // ResolveAgent resolves configured agent names to available agents. A single
 // explicit agent must be runnable; auto probes native agents, then ACP aliases;
 // an ordered list is filtered to available agents, deduplicated by resolved
-// identity, and kept as fallbacks. The lookPath function should behave like
+// identity, and kept as fallbacks. agent: subscription ranks only the named
+// subscription_agents candidates from one fresh quota-axi snapshot at this
+// boundary (run start / doctor), never per invocation, so review session
+// continuity is preserved. The lookPath function should behave like
 // exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
+	c.SubscriptionRoute = nil
 	candidates := c.configuredAgents()
 	if len(candidates) <= 1 {
 		c.Agent = firstAgent(candidates)
@@ -490,6 +648,9 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 			c.Agents = []types.AgentName{name}
 			return nil
 		}
+		if c.Agent == types.AgentSubscription {
+			return c.resolveSubscriptionAgents(ctx, lookPath)
+		}
 		name, ok, probe, err := c.resolveConfiguredAgent(ctx, c.Agent, lookPath)
 		if err != nil {
 			return err
@@ -502,12 +663,116 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		return nil
 	}
 
+	// A multi-entry list must not mix subscription mode with concrete agents.
+	for _, name := range candidates {
+		if name == types.AgentSubscription {
+			return fmt.Errorf("agent: subscription cannot appear in an ordered fallback list; set agent: subscription and name candidates under subscription_agents")
+		}
+	}
+
 	resolved, err := c.resolveAgentList(ctx, candidates, lookPath)
 	if err != nil {
 		return err
 	}
 	c.Agent = resolved[0]
 	c.Agents = resolved
+	return nil
+}
+
+// resolveSubscriptionAgents is the selection boundary for agent: subscription.
+// It probes configured candidates, consults one fresh quota-axi snapshot, and
+// stores an ordered SubscriptionRoute. Claude and every other provider stay out
+// unless explicitly listed in subscription_agents.candidates.
+func (c *Config) resolveSubscriptionAgents(ctx context.Context, lookPath func(string) (string, error)) error {
+	if err := validateSubscriptionAgents(c.SubscriptionAgents); err != nil {
+		return err
+	}
+	quotaCandidates := make([]quota.Candidate, 0, len(c.SubscriptionAgents.Candidates))
+	probed := make([]string, 0, len(c.SubscriptionAgents.Candidates))
+	providers := make([]string, 0, len(c.SubscriptionAgents.Candidates))
+	seenProvider := map[string]bool{}
+	for _, cand := range c.SubscriptionAgents.Candidates {
+		args := cand.EffectiveArgs(c.AgentArgsFor(cand.Agent))
+		if err := validateCandidateArgs(cand.Agent, args); err != nil {
+			return fmt.Errorf("subscription_agents candidate %q: %w", cand.Name, err)
+		}
+		_, ok, probe, err := c.resolveConfiguredAgent(ctx, cand.Agent, lookPath)
+		if err != nil {
+			return fmt.Errorf("subscription_agents candidate %q: %w", cand.Name, err)
+		}
+		if probe != "" {
+			probed = append(probed, probe)
+		}
+		qc := quota.Candidate{
+			Name:          cand.Name,
+			Agent:         cand.Agent,
+			QuotaProvider: cand.QuotaProvider,
+			Args:          args,
+			Model:         cand.Model,
+			Runnable:      ok,
+			Probe:         probe,
+		}
+		quotaCandidates = append(quotaCandidates, qc)
+		key := strings.ToLower(strings.TrimSpace(cand.QuotaProvider))
+		if ok && key != "" && !seenProvider[key] {
+			seenProvider[key] = true
+			providers = append(providers, key)
+		}
+	}
+
+	fetch := c.QuotaFetch
+	if fetch == nil {
+		fetch = quota.DefaultFetch
+	}
+	bin := c.SubscriptionAgents.QuotaAXIPath
+	if strings.TrimSpace(bin) == "" {
+		bin = "quota-axi"
+	}
+	if lookPath != nil {
+		if resolved, err := lookPath(bin); err == nil && resolved != "" {
+			bin = resolved
+		}
+	}
+	snap, snapErr := fetch(ctx, bin, providers)
+	sel := quota.Select(quotaCandidates, snap, snapErr)
+	if len(sel.Ordered) == 0 {
+		names := make([]string, 0, len(c.SubscriptionAgents.Candidates))
+		for _, cand := range c.SubscriptionAgents.Candidates {
+			names = append(names, cand.Name)
+		}
+		return fmt.Errorf(
+			"no runnable subscription_agents candidate among %s (looked for: %s); %s; install a configured backend or fix subscription_agents in ~/.no-mistakes/config.yaml",
+			strings.Join(names, ", "),
+			strings.Join(probed, ", "),
+			sel.Summary,
+		)
+	}
+
+	route := &SubscriptionRoute{
+		Ordered:   make([]RoutedSubscriptionCandidate, 0, len(sel.Ordered)),
+		Decisions: sel.Decisions,
+		Summary:   sel.Summary,
+	}
+	backends := make([]types.AgentName, 0, len(sel.Ordered))
+	for _, d := range sel.Ordered {
+		route.Ordered = append(route.Ordered, RoutedSubscriptionCandidate{
+			Name:          d.Name,
+			Agent:         d.Agent,
+			Args:          append([]string(nil), d.Args...),
+			QuotaProvider: d.QuotaProvider,
+			Reason:        d.Reason,
+		})
+		backends = append(backends, d.Agent)
+	}
+	c.SubscriptionRoute = route
+	// Keep Agent/Agents as backend names for path lookup and legacy metadata.
+	// The ordered route carries per-candidate args and labels.
+	c.Agent = backends[0]
+	c.Agents = backends
+	slog.Info("subscription agent route selected", "summary", route.Summary, "primary", route.Ordered[0].Name, "backend", string(backends[0]))
+	for _, d := range route.Decisions {
+		slog.Info("subscription agent candidate", "name", d.Name, "eligible", d.Eligible, "reason", d.Reason)
+	}
 	return nil
 }
 
@@ -618,8 +883,11 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		}
 		return resolved, err == nil, "auto", err
 	}
+	if name == types.AgentSubscription {
+		return "", false, string(name), fmt.Errorf("agent %q is only valid as the top-level agent value with subscription_agents candidates", name)
+	}
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
-		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, subscription, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
 	if isACPAgent(name) {
 		available, bins, err := c.acpAvailable(name, lookPath)
@@ -769,6 +1037,88 @@ func (c *Config) AgentArgsFor(name types.AgentName) []string {
 		return nil
 	}
 	return c.AgentArgsOverride[string(name)]
+}
+
+func validateSubscriptionAgents(cfg SubscriptionAgentsConfig) error {
+	if len(cfg.Candidates) == 0 {
+		return fmt.Errorf("agent: subscription requires subscription_agents.candidates in ~/.no-mistakes/config.yaml")
+	}
+	seen := map[string]bool{}
+	for i, cand := range cfg.Candidates {
+		name := strings.TrimSpace(cand.Name)
+		if name == "" {
+			return fmt.Errorf("subscription_agents.candidates[%d].name is required", i)
+		}
+		if seen[name] {
+			return fmt.Errorf("subscription_agents.candidates name %q is duplicated", name)
+		}
+		seen[name] = true
+		agentName := types.AgentName(strings.TrimSpace(string(cand.Agent)))
+		if agentName == "" {
+			return fmt.Errorf("subscription_agents.candidates[%d] (%s): agent is required", i, name)
+		}
+		if agentName == types.AgentAuto || agentName == types.AgentSubscription {
+			return fmt.Errorf("subscription_agents.candidates[%d] (%s): agent %q is not a concrete backend", i, name, agentName)
+		}
+		if _, ok := defaultBinary[agentName]; !ok && !isACPAgent(agentName) {
+			return fmt.Errorf("subscription_agents.candidates[%d] (%s): unknown agent %q", i, name, agentName)
+		}
+		if strings.TrimSpace(cand.QuotaProvider) == "" {
+			return fmt.Errorf("subscription_agents.candidates[%d] (%s): quota_provider is required", i, name)
+		}
+		for j, arg := range cand.Args {
+			if strings.TrimSpace(arg) == "" {
+				return fmt.Errorf("subscription_agents.candidates[%d] (%s).args[%d] must not be empty", i, name, j)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCandidateArgs(agentName types.AgentName, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return validateAgentArgsOverride(map[string][]string{string(agentName): args})
+}
+
+func parseSubscriptionAgents(raw *subscriptionAgentsRaw) (SubscriptionAgentsConfig, error) {
+	if raw == nil {
+		return SubscriptionAgentsConfig{}, nil
+	}
+	out := SubscriptionAgentsConfig{
+		QuotaAXIPath: strings.TrimSpace(raw.QuotaAXIPath),
+		Candidates:   make([]SubscriptionCandidate, 0, len(raw.Candidates)),
+	}
+	for i, c := range raw.Candidates {
+		name := strings.TrimSpace(c.Name)
+		agentName := types.AgentName(strings.TrimSpace(c.Agent))
+		quotaProvider := strings.TrimSpace(c.QuotaProvider)
+		args := append([]string(nil), c.Args...)
+		out.Candidates = append(out.Candidates, SubscriptionCandidate{
+			Name:          name,
+			Agent:         agentName,
+			QuotaProvider: quotaProvider,
+			Args:          args,
+			Provider:      strings.TrimSpace(c.Provider),
+			Model:         strings.TrimSpace(c.Model),
+		})
+		// Keep index in errors stable even before validateSubscriptionAgents.
+		_ = i
+	}
+	if err := validateSubscriptionAgents(out); err != nil {
+		// Allow empty/absent block without agent: subscription; only validate
+		// structure when candidates were provided.
+		if len(out.Candidates) == 0 && strings.TrimSpace(out.QuotaAXIPath) == "" {
+			return SubscriptionAgentsConfig{}, nil
+		}
+		if len(out.Candidates) == 0 {
+			return out, nil
+		}
+		// Partial candidate rows should fail closed at load time.
+		return SubscriptionAgentsConfig{}, err
+	}
+	return out, nil
 }
 
 // agentArgsOverrideAgents lists native agent names accepted as keys in
@@ -930,6 +1280,13 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
+	}
+	if raw.SubscriptionAgents != nil {
+		sub, err := parseSubscriptionAgents(raw.SubscriptionAgents)
+		if err != nil {
+			return nil, fmt.Errorf("parse global config: %w", err)
+		}
+		cfg.SubscriptionAgents = sub
 	}
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
@@ -1259,6 +1616,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		ACPRegistryOverrides: global.ACPRegistryOverrides,
 		AgentPathOverride:    global.AgentPathOverride,
 		AgentArgsOverride:    global.AgentArgsOverride,
+		SubscriptionAgents:   copySubscriptionAgents(global.SubscriptionAgents),
 		CITimeout:            global.CITimeout,
 		StepQuietWarning:     global.StepQuietWarning,
 		LogLevel:             global.LogLevel,
@@ -1281,7 +1639,30 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		if len(cfg.Agents) == 0 {
 			cfg.Agents = []types.AgentName{repo.Agent}
 		}
+		// Repo agent overrides disable subscription routing for this run unless
+		// the repo itself selects subscription (rare; still uses global candidates).
 	}
 
 	return cfg
+}
+
+func copySubscriptionAgents(in SubscriptionAgentsConfig) SubscriptionAgentsConfig {
+	out := SubscriptionAgentsConfig{
+		QuotaAXIPath: in.QuotaAXIPath,
+	}
+	if len(in.Candidates) == 0 {
+		return out
+	}
+	out.Candidates = make([]SubscriptionCandidate, len(in.Candidates))
+	for i, c := range in.Candidates {
+		out.Candidates[i] = SubscriptionCandidate{
+			Name:          c.Name,
+			Agent:         c.Agent,
+			QuotaProvider: c.QuotaProvider,
+			Args:          append([]string(nil), c.Args...),
+			Provider:      c.Provider,
+			Model:         c.Model,
+		}
+	}
+	return out
 }

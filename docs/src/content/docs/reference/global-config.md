@@ -73,17 +73,18 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 
 |         |                                                                                             |
 | ------- | ------------------------------------------------------------------------------------------- |
-| Type    | `string` or `string[]`                                                                      |
-| Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
-| Default | `auto`                                                                                      |
+| Type    | `string` or `string[]`                                                                                      |
+| Values  | `auto`, `subscription`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
+| Default | `auto`                                                                                                      |
 
 `auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`.
 `cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
 With default paths, `auto` only selects it when both `cursor-agent` and `acpx` resolve; `acp_registry_overrides.cursor` and `acpx_path` replace those respective defaults during availability checks.
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`; `acp:cursor` uses the same default command as `cursor`.
 Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
+`subscription` ranks only the candidates named under [`subscription_agents`](#subscription_agents); it never adds Claude or any other provider that is not explicitly listed.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
-If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
+If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, no fallback-list entry is available, or no subscription candidate is runnable, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
 `no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
 
 You can also set an ordered fallback list:
@@ -97,6 +98,57 @@ After resolving `auto`, entries that resolve to the same ACP target are deduplic
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
+`agent: subscription` cannot appear inside an ordered fallback list; use `subscription_agents.candidates` instead.
+
+### subscription_agents
+
+Global-only candidate set for `agent: subscription`.
+Each candidate names a concrete backend, the `quota-axi` provider id used for headroom, and optional backend identity flags (for example Pi `--provider` / `--model`).
+
+|         |            |
+| ------- | ---------- |
+| Type    | object     |
+| Default | unset      |
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `quota_axi_path` | `string` | Optional path to `quota-axi`. Default `quota-axi` on `PATH`. |
+| `candidates` | `object[]` | Required when `agent: subscription`. |
+| `candidates[].name` | `string` | Unique operator label (`kimi`, `codex`, `grok`, ...). |
+| `candidates[].agent` | `string` | Concrete backend: `pi`, `codex`, `claude`, ... (not `auto` / `subscription`). |
+| `candidates[].quota_provider` | `string` | `quota-axi` provider id (`kimi`, `codex`, `grok`, ...). |
+| `candidates[].args` | `string[]` | Optional full extra argv for this candidate. |
+| `candidates[].provider` | `string` | Optional Pi `--provider` sugar when `args` is empty. |
+| `candidates[].model` | `string` | Optional model sugar (`--model` for Pi, `-m` for Codex) when `args` is empty, and a hint for model-scoped quota rows. |
+
+**Selection boundary:** `ResolveAgent` (run start and `doctor`) takes **one** fresh `quota-axi --json` snapshot and ranks only the configured candidates.
+Unknown, stale, rate-limited, or non-fresh quota is never treated as healthy headroom.
+Among known fresh headroom, higher `effectivePercentRemaining` wins, then better pace (`behind` > `on_pace` > `mixed` > `ahead`), then configuration order.
+Runnable candidates with unknown quota stay eligible only in an explicit unknown band after known headroom, still in config order, and never invent percentages.
+Selection is intentionally **run-scoped**, not per invocation, so review/fixer session continuity is preserved for session-capable backends; process-level fallback still walks the ordered route when a backend cannot start or exits.
+Claude (or any other provider) enters the route only when listed under `candidates`.
+
+When `args` is empty and no provider/model sugar is set, the candidate inherits global `agent_args_override` for its backend.
+Per-candidate `args` replace that shared override so two Pi subscriptions (Kimi and Grok) can carry different identities.
+
+```yaml
+agent: subscription
+subscription_agents:
+  candidates:
+    - name: kimi
+      agent: pi
+      quota_provider: kimi
+      provider: kimi-coding
+      model: k3
+    - name: codex
+      agent: codex
+      quota_provider: codex
+    - name: grok
+      agent: pi
+      quota_provider: grok
+      provider: xai
+      model: grok-4.5
+```
 
 ### acpx_path
 

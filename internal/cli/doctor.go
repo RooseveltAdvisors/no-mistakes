@@ -140,6 +140,12 @@ func newDoctorCmd() *cobra.Command {
 						if err := cfg.ResolveAgent(cmd.Context(), exec.LookPath); err != nil {
 							fail("gate validation", err.Error())
 							allOK = false
+						} else if cfg.SubscriptionRoute != nil && len(cfg.SubscriptionRoute.Ordered) > 0 {
+							names := make([]string, 0, len(cfg.SubscriptionRoute.Ordered))
+							for _, rc := range cfg.SubscriptionRoute.Ordered {
+								names = append(names, rc.Name)
+							}
+							ok("gate validation", fmt.Sprintf("subscription route runnable (%s)", strings.Join(names, " -> ")))
 						} else {
 							ok("gate validation", fmt.Sprintf("%s is runnable", cfg.Agent))
 						}
