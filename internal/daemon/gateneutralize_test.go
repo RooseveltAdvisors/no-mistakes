@@ -255,6 +255,16 @@ func TestNewPipelineAgent_SubscriptionOptOut_KeepsNativeCodexAndDropsUnverifiedP
 	if cfg.SubscriptionRoute.Ordered[0].Name != "codex" || cfg.SubscriptionRoute.Ordered[0].Agent != types.AgentCodex {
 		t.Fatalf("remaining route entry = %+v, want native codex", cfg.SubscriptionRoute.Ordered[0])
 	}
+	persistedRoute, err := cfg.MarshalSubscriptionRoute()
+	if err != nil {
+		t.Fatalf("marshal filtered subscription route: %v", err)
+	}
+	if !strings.Contains(persistedRoute, `"name":"codex"`) ||
+		strings.Contains(persistedRoute, `"name":"kimi"`) ||
+		strings.Contains(persistedRoute, `"name":"grok"`) {
+		t.Fatalf("persisted recovery route must contain only native codex, got %s", persistedRoute)
+	}
+	t.Logf("persisted filtered recovery route: %s", persistedRoute)
 	if agent.SupportsSessionProvider(ag, "pi") {
 		t.Fatal("dropped Pi candidates must not remain as session providers under opt-out")
 	}
