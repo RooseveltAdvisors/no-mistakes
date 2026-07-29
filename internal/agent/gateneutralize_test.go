@@ -113,6 +113,41 @@ func TestNeutralizesGateInstructions_ThroughProductionWrapping(t *testing.T) {
 	}
 }
 
+// TestEnsureGateNeutralized_NamesNonNeutralizingMembers proves mixed fallback
+// refusals name the unverified members and do not claim the primary verified
+// label is itself the problem (the contradictory "codex does not neutralize;
+// set agent to codex" message from subscription+opt-out).
+func TestEnsureGateNeutralized_NamesNonNeutralizingMembers(t *testing.T) {
+	mixed := NewFallback([]Agent{
+		WithSteering(WithCandidateLabel(optOutAgent(t, types.AgentCodex, nil), "codex")),
+		WithSteering(WithCandidateLabel(optOutAgent(t, types.AgentPi, nil), "kimi")),
+	})
+	err := EnsureGateNeutralized(mixed)
+	if err == nil {
+		t.Fatal("mixed fallback must be refused under opt-out")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "kimi") || !strings.Contains(msg, "pi") {
+		t.Fatalf("refusal must name the unverified candidate, got: %v", err)
+	}
+	if strings.Contains(msg, `gate agent "codex" does not neutralize`) {
+		t.Fatalf("refusal must not blame the verified primary label alone, got: %v", err)
+	}
+}
+
+// TestNeutralizesGateInstructions_LabeledCandidateDelegates proves subscription
+// labeling preserves the concrete backend's neutralization capability.
+func TestNeutralizesGateInstructions_LabeledCandidateDelegates(t *testing.T) {
+	codex := WithSteering(WithCandidateLabel(optOutAgent(t, types.AgentCodex, nil), "codex"))
+	if err := EnsureGateNeutralized(codex); err != nil {
+		t.Fatalf("labeled native codex must neutralize under opt-out: %v", err)
+	}
+	kimi := WithSteering(WithCandidateLabel(optOutAgent(t, types.AgentPi, nil), "kimi"))
+	if NeutralizesGateInstructions(kimi) {
+		t.Fatal("labeled Pi candidate must not report neutralized")
+	}
+}
+
 // TestNeutralizesGateInstructions_HonestOnEffectiveOverride proves the capability
 // is honest about the EFFECTIVE knob value: a preserving operator override is
 // admitted; a defeating one fails closed - even for codex/claude.

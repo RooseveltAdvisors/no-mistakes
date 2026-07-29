@@ -158,6 +158,13 @@ func NeutralizesGateInstructions(a Agent) bool {
 // agent so an unverified harness is refused with a clear error rather than run
 // unneutralized in the target checkout. Only codex and claude have a verified
 // neutralization knob today.
+//
+// The error names every non-neutralizing member of a fallback/subscription set
+// so a verified primary (for example native codex selected via agent:
+// subscription) is never blamed alone while an unverified fallback is the real
+// reason, and never tells the operator to "set agent: codex" when the concrete
+// backend is already codex but ineffective (override) or mixed with unsupported
+// members.
 func EnsureGateNeutralized(a Agent) error {
 	if a == nil {
 		return fmt.Errorf("no gate agent configured")
@@ -165,11 +172,49 @@ func EnsureGateNeutralized(a Agent) error {
 	if NeutralizesGateInstructions(a) {
 		return nil
 	}
-	return fmt.Errorf("gate agent %q does not neutralize the target repository's project "+
+	offenders := GateNeutralizationOffenders(a)
+	offenderText := strings.Join(offenders, ", ")
+	if offenderText == "" {
+		offenderText = DescribeAgent(a)
+	}
+	return fmt.Errorf("gate agent set does not neutralize the target repository's project "+
 		"agent-instruction files (AGENTS.md/CLAUDE.md); refusing to launch it in the target "+
-		"checkout. Only codex and claude have a verified neutralization knob (and only when it "+
-		"is not overridden by agent_args_override); set 'agent' to codex or claude in "+
-		"~/.no-mistakes/config.yaml", a.Name())
+		"checkout. Non-neutralizing members: %s. Only codex and claude have a verified "+
+		"neutralization knob, and only when that knob is not overridden by "+
+		"agent_args_override; under disable_project_settings keep only those backends "+
+		"(explicit agent, ordered fallback, or subscription_agents candidates)", offenderText)
+}
+
+// GateNeutralizationOffenders returns inspectable names for every member of a
+// (possibly wrapped or fallback) agent set that does not neutralize project
+// agent-instruction files. Nil input yields a single placeholder; a fully
+// neutralized set yields nil. Steering and subscription-label wrappers are
+// unwrapped so the reported name is the concrete backend (for example
+// "kimi(pi)"), not just the operator label.
+func GateNeutralizationOffenders(a Agent) []string {
+	if a == nil {
+		return []string{"<nil>"}
+	}
+	switch v := a.(type) {
+	case *fallbackAgent:
+		var out []string
+		for _, member := range v.agents {
+			out = append(out, GateNeutralizationOffenders(member)...)
+		}
+		return out
+	case steeredAgent:
+		return GateNeutralizationOffenders(v.Agent)
+	case *labeledCandidate:
+		if NeutralizesGateInstructions(v) {
+			return nil
+		}
+		return []string{DescribeAgent(v)}
+	default:
+		if !NeutralizesGateInstructions(a) {
+			return []string{DescribeAgent(a)}
+		}
+		return nil
+	}
 }
 
 // LifecycleEvent describes process-level activity for an agent invocation.

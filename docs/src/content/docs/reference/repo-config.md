@@ -122,8 +122,9 @@ When enabled, no-mistakes suppresses the target checkout's project settings for 
 Codex and Claude are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, while Claude loads only its user setting source.
 The setting applies to both new and resumed sessions.
 
-The gate fails before launching an agent if any resolved agent or fallback lacks a verified suppression mechanism.
+The gate fails before launching an agent if any resolved explicit agent or ordered fallback member lacks a verified suppression mechanism.
 It also fails if `agent_args_override` defeats suppression, such as a nonzero Codex `project_doc_max_bytes` or Claude setting sources that include `project` or `local`.
+For `agent: subscription`, candidates whose concrete backend cannot neutralize (for example Pi-backed Kimi/Grok) are dropped from the launch route so a verified primary such as native Codex still runs; if no neutralizing candidate remains, the gate fails with the dropped members named.
 When this option is `false`, missing, or `null`, all agents retain their existing project-setting behavior.
 
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.

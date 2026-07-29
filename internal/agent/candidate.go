@@ -58,23 +58,36 @@ func (a *labeledCandidate) NeutralizesGateInstructions() bool {
 }
 
 // CandidateLabel returns the operator label when a is a labeled candidate.
+// Steering wrappers are unwrapped so production WithSteering(WithCandidateLabel(...))
+// agents still expose the subscription label.
 func CandidateLabel(a Agent) string {
-	if c, ok := a.(*labeledCandidate); ok {
-		return c.label
+	switch v := a.(type) {
+	case *labeledCandidate:
+		return v.label
+	case steeredAgent:
+		return CandidateLabel(v.Agent)
+	default:
+		return ""
 	}
-	return ""
 }
 
 // BackendName returns the underlying backend agent name for a possibly labeled
-// candidate, or a.Name() otherwise.
+// or steered candidate, or a.Name() otherwise.
 func BackendName(a Agent) string {
-	if c, ok := a.(*labeledCandidate); ok && c.inner != nil {
-		return c.inner.Name()
-	}
-	if a == nil {
+	switch v := a.(type) {
+	case *labeledCandidate:
+		if v.inner != nil {
+			return BackendName(v.inner)
+		}
 		return ""
+	case steeredAgent:
+		return BackendName(v.Agent)
+	default:
+		if a == nil {
+			return ""
+		}
+		return a.Name()
 	}
-	return a.Name()
 }
 
 // DescribeAgent returns an inspectable name for logs.
