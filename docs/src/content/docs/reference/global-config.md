@@ -127,6 +127,7 @@ Among known fresh headroom, higher `effectivePercentRemaining` wins, then better
 Runnable candidates with unknown quota stay eligible only in an explicit unknown band after known headroom, still in config order, and never invent percentages.
 Selection is intentionally **run-scoped**, not per invocation, so review/fixer session continuity is preserved for session-capable backends; process-level fallback still walks the ordered route when a backend cannot start or exits.
 Claude (or any other provider) enters the route only when listed under `candidates`.
+When a repository sets trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings), only candidates whose concrete backend has a verified project-instruction neutralization knob (Codex and Claude, with the knob still in effect) remain on the launch route; unverified backends such as Pi are dropped rather than blocking a verified primary, and a route with no neutralizing candidate fails closed before the first step.
 
 When `args` is empty and no provider/model sugar is set, the candidate inherits global `agent_args_override` for its backend.
 Per-candidate `args` replace that shared override so two Pi subscriptions (Kimi and Grok) can carry different identities.

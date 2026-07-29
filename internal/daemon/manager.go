@@ -247,9 +247,17 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 // createResolvedPipelineAgents builds concrete agents from ResolveAgent output.
 // Subscription routes carry per-candidate args and labels; legacy Agent/Agents
 // lists keep shared agent_args_override behavior.
+//
+// Under disable_project_settings, subscription candidates whose concrete backend
+// cannot neutralize project agent-instruction files (today anything other than
+// effectively-suppressed codex/claude) are dropped from the launch set rather
+// than poisoning a verified primary via fallback fail-closed. Explicit ordered
+// agent lists still fail closed if any member is unverified.
 func createResolvedPipelineAgents(cfg *config.Config) ([]agent.Agent, error) {
 	if cfg.SubscriptionRoute != nil && len(cfg.SubscriptionRoute.Ordered) > 0 {
 		created := make([]agent.Agent, 0, len(cfg.SubscriptionRoute.Ordered))
+		kept := make([]config.RoutedSubscriptionCandidate, 0, len(cfg.SubscriptionRoute.Ordered))
+		var dropped []string
 		for _, rc := range cfg.SubscriptionRoute.Ordered {
 			next, err := agent.NewWithOptions(rc.Agent, cfg.AgentPathFor(rc.Agent), rc.Args, agent.Options{
 				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
@@ -261,8 +269,41 @@ func createResolvedPipelineAgents(cfg *config.Config) ([]agent.Agent, error) {
 				}
 				return nil, fmt.Errorf("create subscription agent %s (%s): %w", rc.Name, rc.Agent, err)
 			}
-			created = append(created, agent.WithSteering(agent.WithCandidateLabel(next, rc.Name)))
+			labeled := agent.WithSteering(agent.WithCandidateLabel(next, rc.Name))
+			if cfg.DisableProjectSettings && !agent.NeutralizesGateInstructions(labeled) {
+				_ = labeled.Close()
+				dropped = append(dropped, fmt.Sprintf("%s (%s)", rc.Name, rc.Agent))
+				continue
+			}
+			created = append(created, labeled)
+			kept = append(kept, rc)
 		}
+		if cfg.DisableProjectSettings && len(dropped) > 0 {
+			slog.Info("subscription candidates dropped under disable_project_settings",
+				"dropped", strings.Join(dropped, ", "),
+				"kept", len(kept),
+			)
+		}
+		if len(created) == 0 {
+			if cfg.DisableProjectSettings && len(dropped) > 0 {
+				return nil, fmt.Errorf("gate agent set does not neutralize the target repository's project "+
+					"agent-instruction files (AGENTS.md/CLAUDE.md); refusing to launch it in the target "+
+					"checkout. Non-neutralizing members: %s. Only codex and claude have a verified "+
+					"neutralization knob under disable_project_settings; add a codex or claude "+
+					"subscription_agents candidate (or set agent: codex / agent: claude), and do not "+
+					"rely on unverified backends such as pi", strings.Join(dropped, ", "))
+			}
+			return nil, fmt.Errorf("no subscription agents created")
+		}
+		// Persist the launch-time route so recovery and diagnostics match what
+		// will actually run after opt-out filtering.
+		cfg.SubscriptionRoute.Ordered = kept
+		backends := make([]types.AgentName, 0, len(kept))
+		for _, rc := range kept {
+			backends = append(backends, rc.Agent)
+		}
+		cfg.Agent = backends[0]
+		cfg.Agents = backends
 		return created, nil
 	}
 
@@ -804,25 +845,33 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			trackStartFailure("resolve_agent")
 			return "", err
 		}
+		// Build agents before persisting the route so disable_project_settings
+		// filtering inside createResolvedPipelineAgents is what recovery restores.
+		created, agErr := createResolvedPipelineAgents(cfg)
+		if agErr != nil {
+			m.db.UpdateRunError(run.ID, agErr.Error())
+			trackStartFailure("create_agent")
+			return "", agErr
+		}
 		route, routeErr := cfg.MarshalSubscriptionRoute()
 		if routeErr != nil {
+			for _, existing := range created {
+				_ = existing.Close()
+			}
 			m.db.UpdateRunError(run.ID, routeErr.Error())
 			trackStartFailure("persist_agent_route")
 			return "", routeErr
 		}
 		if route != "" {
 			if err := m.db.UpdateRunResolvedAgentRoute(run.ID, route); err != nil {
+				for _, existing := range created {
+					_ = existing.Close()
+				}
 				m.db.UpdateRunError(run.ID, err.Error())
 				trackStartFailure("persist_agent_route")
 				return "", err
 			}
 			run.ResolvedAgentRoute = &route
-		}
-		created, agErr := createResolvedPipelineAgents(cfg)
-		if agErr != nil {
-			m.db.UpdateRunError(run.ID, agErr.Error())
-			trackStartFailure("create_agent")
-			return "", agErr
 		}
 		// Steer is applied inside createResolvedPipelineAgents. Fallback preserves
 		// ordered subscription or legacy agent lists for process-level recovery.
