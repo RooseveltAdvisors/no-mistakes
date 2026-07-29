@@ -85,8 +85,8 @@ func TestAssertBaseBranchUsable_RejectsSelfAsBase(t *testing.T) {
 
 func TestAssertBaseBranchResolvable_NoExplicitBaseSkipsRemoteCheck(t *testing.T) {
 	sctx := baseBranchContext(t, "")
-	// "nonexistent-remote" would fail if the check ran; it must not.
-	if err := assertBaseBranchResolvable(context.Background(), sctx, "nonexistent-remote"); err != nil {
+	sctx.Repo.UpstreamURL = "nonexistent-remote"
+	if err := assertBaseBranchResolvable(context.Background(), sctx); err != nil {
 		t.Fatalf("assertBaseBranchResolvable = %v, want nil without an explicit base", err)
 	}
 }
@@ -94,7 +94,8 @@ func TestAssertBaseBranchResolvable_NoExplicitBaseSkipsRemoteCheck(t *testing.T)
 func TestAssertBaseBranchResolvable_AcceptsExistingRemoteBranch(t *testing.T) {
 	sctx := baseBranchContext(t, preserveBase)
 	remote := newBareRemoteWithBranches(t, sctx.WorkDir, preserveBase)
-	if err := assertBaseBranchResolvable(context.Background(), sctx, remote); err != nil {
+	sctx.Repo.UpstreamURL = gitCmd(t, sctx.WorkDir, "remote", "get-url", remote)
+	if err := assertBaseBranchResolvable(context.Background(), sctx); err != nil {
 		t.Fatalf("assertBaseBranchResolvable = %v, want nil for an existing base", err)
 	}
 }
@@ -102,7 +103,8 @@ func TestAssertBaseBranchResolvable_AcceptsExistingRemoteBranch(t *testing.T) {
 func TestAssertBaseBranchResolvable_RefusesMissingRemoteBranch(t *testing.T) {
 	sctx := baseBranchContext(t, preserveBase)
 	remote := newBareRemoteWithBranches(t, sctx.WorkDir)
-	err := assertBaseBranchResolvable(context.Background(), sctx, remote)
+	sctx.Repo.UpstreamURL = gitCmd(t, sctx.WorkDir, "remote", "get-url", remote)
+	err := assertBaseBranchResolvable(context.Background(), sctx)
 	if err == nil {
 		t.Fatal("assertBaseBranchResolvable = nil, want a refusal for a base absent from the remote")
 	}
@@ -113,12 +115,26 @@ func TestAssertBaseBranchResolvable_RefusesMissingRemoteBranch(t *testing.T) {
 
 func TestAssertBaseBranchResolvable_RefusesUnreachableRemote(t *testing.T) {
 	sctx := baseBranchContext(t, preserveBase)
-	err := assertBaseBranchResolvable(context.Background(), sctx, "no-such-remote")
+	sctx.Repo.UpstreamURL = "no-such-remote"
+	err := assertBaseBranchResolvable(context.Background(), sctx)
 	if err == nil {
 		t.Fatal("assertBaseBranchResolvable = nil, want a refusal when the remote cannot be queried")
 	}
 	if !strings.Contains(err.Error(), "could not resolve explicit base branch") {
 		t.Fatalf("error %q does not fail closed on an unreachable remote", err)
+	}
+}
+
+func TestAssertBaseBranchResolvable_UsesVerifiedUpstreamInsteadOfStaleOrigin(t *testing.T) {
+	sctx := baseBranchContext(t, preserveBase)
+	staleRemote := newBareRemoteWithBranches(t, sctx.WorkDir)
+	gitCmd(t, sctx.WorkDir, "remote", "rename", staleRemote, "origin")
+	refreshedRemote := newBareRemoteWithBranches(t, sctx.WorkDir, preserveBase)
+	sctx.Repo.UpstreamURL = gitCmd(t, sctx.WorkDir, "remote", "get-url", refreshedRemote)
+	sctx.Repo.URLsVerified = true
+
+	if err := assertBaseBranchResolvable(context.Background(), sctx); err != nil {
+		t.Fatalf("assertBaseBranchResolvable = %v, want verified upstream base to resolve", err)
 	}
 }
 

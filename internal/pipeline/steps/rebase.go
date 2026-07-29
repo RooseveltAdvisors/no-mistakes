@@ -36,7 +36,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	if err := assertBaseBranchUsable(sctx); err != nil {
 		return nil, err
 	}
-	if err := assertBaseBranchResolvable(ctx, sctx, resolveUpstreamRemoteName(ctx, sctx.WorkDir, sctx.Repo.UpstreamURL)); err != nil {
+	if err := assertBaseBranchResolvable(ctx, sctx); err != nil {
 		return nil, err
 	}
 	base := baseBranch(sctx)

@@ -85,7 +85,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 	// The base must exist on the remote before a PR targets it; an unresolved
 	// or ambiguous base fails the run rather than silently retargeting.
-	if err := assertBaseBranchResolvable(ctx, sctx, resolveUpstreamRemoteName(ctx, sctx.WorkDir, sctx.Repo.UpstreamURL)); err != nil {
+	if err := assertBaseBranchResolvable(ctx, sctx); err != nil {
 		return nil, err
 	}
 

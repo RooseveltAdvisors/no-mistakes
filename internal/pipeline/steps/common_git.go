@@ -75,7 +75,7 @@ func assertBaseBranchUsable(sctx *pipeline.StepContext) error {
 //
 // It is a no-op when no explicit base is configured: the default-branch path
 // keeps its existing tolerant fetch-and-fall-back behavior.
-func assertBaseBranchResolvable(ctx context.Context, sctx *pipeline.StepContext, remote string) error {
+func assertBaseBranchResolvable(ctx context.Context, sctx *pipeline.StepContext) error {
 	if sctx.Config == nil {
 		return nil
 	}
@@ -83,7 +83,7 @@ func assertBaseBranchResolvable(ctx context.Context, sctx *pipeline.StepContext,
 	if explicit == "" {
 		return nil
 	}
-	out, err := git.Run(ctx, sctx.WorkDir, "ls-remote", "--heads", remote, "refs/heads/"+explicit)
+	out, err := git.Run(ctx, sctx.WorkDir, "ls-remote", "--heads", resolveUpstreamURL(sctx), "refs/heads/"+explicit)
 	if err != nil {
 		return fmt.Errorf("could not resolve explicit base branch %q on the remote: %w", explicit, err)
 	}
