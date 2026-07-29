@@ -2,6 +2,8 @@ package steps
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -176,6 +178,66 @@ func TestRebaseStep_RefusesUnresolvedExplicitBaseBeforeMutating(t *testing.T) {
 	if head := gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD"); head != headBefore {
 		t.Fatalf("HEAD moved to %s from %s; the refusal must precede any mutation", head, headBefore)
 	}
+}
+
+func TestRebaseStep_RebasesOntoExplicitBaseInsteadOfDefaultBranch(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare", "--initial-branch=main", ".")
+
+	workDir := t.TempDir()
+	gitCmd(t, workDir, "init", "--initial-branch=main")
+	gitCmd(t, workDir, "config", "user.name", "test")
+	gitCmd(t, workDir, "config", "user.email", "test@test.com")
+	gitCmd(t, workDir, "remote", "add", "origin", upstream)
+	if err := os.WriteFile(filepath.Join(workDir, "base.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, workDir, "add", "-A")
+	gitCmd(t, workDir, "commit", "-m", "main base")
+	mainSHA := gitCmd(t, workDir, "rev-parse", "HEAD")
+	gitCmd(t, workDir, "push", "origin", "main")
+
+	gitCmd(t, workDir, "checkout", "-b", preserveBase)
+	if err := os.WriteFile(filepath.Join(workDir, "explicit-base.txt"), []byte("required base change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, workDir, "add", "-A")
+	gitCmd(t, workDir, "commit", "-m", "explicit base change")
+	explicitBaseSHA := gitCmd(t, workDir, "rev-parse", "HEAD")
+	gitCmd(t, workDir, "push", "origin", preserveBase)
+
+	gitCmd(t, workDir, "checkout", "-b", "feature", mainSHA)
+	if err := os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, workDir, "add", "-A")
+	gitCmd(t, workDir, "commit", "-m", "feature change")
+	headSHA := gitCmd(t, workDir, "rev-parse", "HEAD")
+	gitCmd(t, workDir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, workDir, mainSHA, headSHA, config.Commands{})
+	sctx.Config.BaseBranch = preserveBase
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("clean explicit-base rebase unexpectedly needs approval: %s", outcome.Findings)
+	}
+	if got := gitCmd(t, workDir, "merge-base", "HEAD", "origin/"+preserveBase); got != explicitBaseSHA {
+		t.Fatalf("HEAD merge-base with explicit base = %s, want %s", got, explicitBaseSHA)
+	}
+	if got := gitCmd(t, workDir, "merge-base", "HEAD", "origin/main"); got == gitCmd(t, workDir, "rev-parse", "HEAD") {
+		t.Fatal("feature collapsed onto the default branch instead of retaining its own change")
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "explicit-base.txt")); err != nil {
+		t.Fatalf("rebased feature does not contain the explicit base change: %v", err)
+	}
+	t.Logf("feature HEAD %s includes explicit base %s and its explicit-base.txt change; default main remains %s",
+		gitCmd(t, workDir, "rev-parse", "HEAD"), explicitBaseSHA, mainSHA)
 }
 
 // The PR step must target the explicit base, and must keep targeting the repo
