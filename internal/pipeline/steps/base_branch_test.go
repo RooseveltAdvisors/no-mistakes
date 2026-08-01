@@ -140,6 +140,21 @@ func TestAssertBaseBranchResolvable_UsesVerifiedUpstreamInsteadOfStaleOrigin(t *
 	}
 }
 
+func TestPrepareExplicitBaseBranchFetchesRemoteTrackingRef(t *testing.T) {
+	sctx := baseBranchContext(t, preserveBase)
+	remote := newBareRemoteWithBranches(t, sctx.WorkDir, preserveBase)
+	sctx.Repo.UpstreamURL = gitCmd(t, sctx.WorkDir, "remote", "get-url", remote)
+
+	if err := PrepareExplicitBaseBranch(context.Background(), sctx); err != nil {
+		t.Fatal(err)
+	}
+	got := gitCmd(t, sctx.WorkDir, "rev-parse", "refs/remotes/origin/"+preserveBase)
+	want := gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD")
+	if got != want {
+		t.Fatalf("fetched explicit base = %s, want %s", got, want)
+	}
+}
+
 // The rebase step is the first step that acts on the base; a bad explicit base
 // must stop it before any fetch, rebase, or later push/PR mutation.
 func TestRebaseStep_RefusesUnsafeExplicitBaseBeforeMutating(t *testing.T) {

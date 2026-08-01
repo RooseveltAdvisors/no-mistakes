@@ -37,8 +37,7 @@ func baseBranch(sctx *pipeline.StepContext) string {
 }
 
 // assertBaseBranchUsable fails closed when an explicit base is unsafe or would
-// defeat the gate. It is called at the entry of every step that mutates on the
-// base's behalf (rebase, push, PR), before any fetch, rebase, push, or PR call.
+// defeat the gate.
 //
 // Two rejections, both fatal to the run rather than merely logged:
 //   - a syntactically unsafe or ambiguous ref (config.ValidateBaseBranch), so
@@ -98,6 +97,28 @@ func assertBaseBranchResolvable(ctx context.Context, sctx *pipeline.StepContext)
 		return fmt.Errorf("explicit base branch %q does not exist on the remote", explicit)
 	case matches > 1:
 		return fmt.Errorf("explicit base branch %q is ambiguous on the remote (%d matching refs)", explicit, matches)
+	}
+	return nil
+}
+
+// PrepareExplicitBaseBranch validates, resolves, and fetches the trusted
+// explicit integration base before pipeline step dispatch.
+func PrepareExplicitBaseBranch(ctx context.Context, sctx *pipeline.StepContext) error {
+	if err := assertBaseBranchUsable(sctx); err != nil {
+		return err
+	}
+	if sctx.Config == nil || strings.TrimSpace(sctx.Config.BaseBranch) == "" {
+		return nil
+	}
+	if err := assertBaseBranchResolvable(ctx, sctx); err != nil {
+		return err
+	}
+	base := strings.TrimSpace(sctx.Config.BaseBranch)
+	if err := fetchRunUpstreamBranch(ctx, sctx, base); err != nil {
+		return fmt.Errorf("could not fetch explicit base branch %q: %w", base, err)
+	}
+	if _, err := git.ResolveRef(ctx, sctx.WorkDir, "refs/remotes/origin/"+base); err != nil {
+		return fmt.Errorf("could not resolve fetched explicit base branch %q: %w", base, err)
 	}
 	return nil
 }
