@@ -117,10 +117,10 @@ func (a *fallbackAgent) sessionCandidates(provider string) ([]Agent, error) {
 		}
 		backend = append(backend, current)
 	}
-	if len(labeled) == 1 {
+	if len(labeled) == 1 && len(backend) == 0 {
 		return labeled, nil
 	}
-	if len(labeled) > 1 || len(backend) > 1 {
+	if len(labeled) > 1 || len(backend) > 1 || (len(labeled) == 1 && len(backend) == 1) {
 		return nil, fmt.Errorf("session provider %q is ambiguous", provider)
 	}
 	if len(backend) == 1 {

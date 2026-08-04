@@ -99,3 +99,26 @@ func TestFallbackAgent_RejectsAmbiguousLegacyProvider(t *testing.T) {
 		t.Fatalf("ambiguous resume invoked candidates: %d/%d", first.calls, second.calls)
 	}
 }
+
+func TestFallbackAgent_RejectsLabelBackendCollision(t *testing.T) {
+	label := &fallbackTestAgent{name: "codex", resumable: true, run: func() (*Result, error) {
+		return &Result{Text: "label"}, nil
+	}}
+	backend := &fallbackTestAgent{name: "codex", resumable: true, run: func() (*Result, error) {
+		return &Result{Text: "backend"}, nil
+	}}
+	ag := NewFallback([]Agent{
+		WithCandidateLabel(label, "codex"),
+		WithCandidateLabel(backend, "codex-fast"),
+	})
+	if SupportsSessionProvider(ag, "codex") {
+		t.Fatal("label/backend collision must not be resumable")
+	}
+	_, err := ag.Run(context.Background(), RunOpts{Session: &SessionRef{ID: "legacy", Agent: "codex"}})
+	if err == nil || err.Error() != `session provider "codex" is ambiguous` {
+		t.Fatalf("collision resume error = %v", err)
+	}
+	if label.calls != 0 || backend.calls != 0 {
+		t.Fatalf("collision resume invoked candidates: %d/%d", label.calls, backend.calls)
+	}
+}
