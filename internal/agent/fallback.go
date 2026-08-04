@@ -43,12 +43,8 @@ func (a *fallbackAgent) SupportsSessionResume() bool {
 }
 
 func (a *fallbackAgent) SupportsSessionProvider(provider string) bool {
-	for _, current := range a.agents {
-		if SupportsSessionProvider(current, provider) {
-			return true
-		}
-	}
-	return false
+	_, err := a.sessionCandidates(provider)
+	return err == nil
 }
 
 func (a *fallbackAgent) ReportsAgentAttempts() bool { return true }
@@ -73,16 +69,11 @@ func (a *fallbackAgent) NeutralizesGateInstructions() bool {
 func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	candidates := a.agents
 	if opts.Session != nil && opts.Session.ID != "" && opts.Session.Agent != "" {
-		candidates = nil
-		for _, current := range a.agents {
-			if SupportsSessionProvider(current, opts.Session.Agent) {
-				candidates = append(candidates, current)
-				break
-			}
+		selected, err := a.sessionCandidates(opts.Session.Agent)
+		if err != nil {
+			return nil, err
 		}
-		if len(candidates) == 0 {
-			return nil, fmt.Errorf("session provider %q is not configured", opts.Session.Agent)
-		}
+		candidates = selected
 	}
 	var lastErr error
 	for i, current := range candidates {
@@ -112,6 +103,30 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		}
 	}
 	return nil, lastErr
+}
+
+func (a *fallbackAgent) sessionCandidates(provider string) ([]Agent, error) {
+	var labeled, backend []Agent
+	for _, current := range a.agents {
+		if !SupportsSessionProvider(current, provider) {
+			continue
+		}
+		if CandidateLabel(current) == provider {
+			labeled = append(labeled, current)
+			continue
+		}
+		backend = append(backend, current)
+	}
+	if len(labeled) == 1 {
+		return labeled, nil
+	}
+	if len(labeled) > 1 || len(backend) > 1 {
+		return nil, fmt.Errorf("session provider %q is ambiguous", provider)
+	}
+	if len(backend) == 1 {
+		return backend, nil
+	}
+	return nil, fmt.Errorf("session provider %q is not configured", provider)
 }
 
 func (a *fallbackAgent) Close() error {

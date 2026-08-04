@@ -76,3 +76,26 @@ func TestFallbackAgent_ResumesExactLabeledCandidate(t *testing.T) {
 		t.Fatalf("second candidate calls = %d, want 2", second.calls)
 	}
 }
+
+func TestFallbackAgent_RejectsAmbiguousLegacyProvider(t *testing.T) {
+	first := &fallbackTestAgent{name: "pi", resumable: true, run: func() (*Result, error) {
+		return &Result{Text: "first"}, nil
+	}}
+	second := &fallbackTestAgent{name: "pi", resumable: true, run: func() (*Result, error) {
+		return &Result{Text: "second"}, nil
+	}}
+	ag := NewFallback([]Agent{
+		WithCandidateLabel(first, "kimi"),
+		WithCandidateLabel(second, "grok"),
+	})
+	if SupportsSessionProvider(ag, "pi") {
+		t.Fatal("ambiguous backend identity must not be resumable")
+	}
+	_, err := ag.Run(context.Background(), RunOpts{Session: &SessionRef{ID: "legacy", Agent: "pi"}})
+	if err == nil || err.Error() != `session provider "pi" is ambiguous` {
+		t.Fatalf("legacy resume error = %v", err)
+	}
+	if first.calls != 0 || second.calls != 0 {
+		t.Fatalf("ambiguous resume invoked candidates: %d/%d", first.calls, second.calls)
+	}
+}

@@ -370,6 +370,39 @@ func TestRunSessions_FallbackResumesWithItsActualProvider(t *testing.T) {
 	}
 }
 
+func TestRunSessions_AmbiguousLegacyProviderStartsCold(t *testing.T) {
+	d, run := sessionTestDB(t)
+	if err := d.UpsertRunAgentSession(run.ID, string(SessionRoleReviewer), "pi", "legacy-session"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	kimi := newFakeSessionAgent()
+	kimi.name = "pi"
+	grok := newFakeSessionAgent()
+	grok.name = "pi"
+	fallback := agent.NewFallback([]agent.Agent{
+		agent.WithCandidateLabel(kimi, "kimi"),
+		agent.WithCandidateLabel(grok, "grok"),
+	})
+
+	rs := NewRunSessions(d, run.ID, fallback, true)
+	if _, err := rs.Run(context.Background(), fallback, SessionRoleReviewer, agent.RunOpts{Prompt: "review"}, nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(kimi.calls) != 1 || len(grok.calls) != 0 {
+		t.Fatalf("candidate calls = kimi %d grok %d, want 1/0", len(kimi.calls), len(grok.calls))
+	}
+	if kimi.calls[0].session == nil || kimi.calls[0].session.ID != "" {
+		t.Fatalf("ambiguous legacy session was resumed: %+v", kimi.calls[0].session)
+	}
+	stored, err := d.GetRunAgentSessions(run.ID)
+	if err != nil {
+		t.Fatalf("stored sessions: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Agent != "kimi" || stored[0].SessionID != "sess-1" {
+		t.Fatalf("stored replacement session = %+v", stored)
+	}
+}
+
 // TestRunSessions_AgentChangeDiscardsStoredSession proves a stored identity
 // from a different adapter is never fed to the current one.
 func TestRunSessions_AgentChangeDiscardsStoredSession(t *testing.T) {
