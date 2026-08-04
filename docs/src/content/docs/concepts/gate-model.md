@@ -187,6 +187,8 @@ Run records also store the nullable `awaiting_agent_since` timestamp used only t
 Each agent invocation records local-only purpose, provider/model metadata, session mode and a truncated session-identity hash, timing, failure category, and token usage; prompts, outputs, diffs, and credentials are never stored there.
 Use `no-mistakes stats --agents` for aggregates or `no-mistakes stats --run <id>` for a run timeline and parked time.
 Repo records store the `upstream_url` fetch/default-branch authority and an optional `fork_url`; branch pushes use `fork_url` when present, while PR and CI provider context stays anchored to the GitHub parent for normal fork routing or to the GitHub target for local-origin routing.
+Run records persist the selected subscription route when one is used, so recovery retains its candidate order, labels, and effective arguments instead of consulting a new quota snapshot.
+The writable database open applies additive schema migrations; the read-only gate preflight tolerates only expected missing columns owned by those migrations while an older state database is upgraded, and unexpected schema errors still fail closed.
 At the start of each run, no-mistakes best-effort refreshes those URLs from the working clone without changing any clone or gate remote.
 `origin` is the upstream authority, and an existing fork registration is refreshed only when exactly one other clone remote identifies the same fork repository.
 The two registered URLs are replaced atomically after validation; an unreadable, invalid, credential-bearing, or ambiguous remote, or a database failure, leaves the exact prior registration in place and does not stop the run.

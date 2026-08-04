@@ -129,6 +129,7 @@ Unknown, stale, rate-limited, or non-fresh quota is never treated as healthy hea
 Among known fresh headroom, higher `effectivePercentRemaining` wins, then better pace (`behind` > `on_pace` > `mixed` > `ahead`), then configuration order.
 Runnable candidates with unknown quota stay eligible only in an explicit unknown band after known headroom, still in config order, and never invent percentages.
 Selection is intentionally **run-scoped**, not per invocation, so review/fixer session continuity is preserved for session-capable backends; process-level fallback still walks the ordered route when a backend cannot start or exits.
+The selected route is persisted with the run, including candidate labels and effective args, so daemon recovery reuses it instead of re-ranking current quota for an already-started run.
 Claude (or any other provider) enters the route only when listed under `candidates`.
 When a repository sets trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings), only candidates whose concrete backend has a verified project-instruction neutralization knob (Codex, Claude, and Pi, with the knob still in effect) remain on the launch route; unverified backends such as OpenCode are dropped rather than blocking a verified primary, and a route with no neutralizing candidate fails closed before the first step.
 
@@ -341,6 +342,7 @@ When enabled and the pipeline agent supports native session resume (claude via `
 Review turns - the initial full review and every full rereview - always run as fresh, session-free invocations regardless of this setting: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record.
+If older state contains only a backend identity that matches multiple subscription candidates, no-mistakes treats it as ambiguous, starts that turn cold, and records a new candidate-specific session rather than guessing.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts.
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.

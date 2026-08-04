@@ -65,7 +65,7 @@ gh auth status
 ```
 
 `no-mistakes doctor` also checks for `gh` availability.
-For PR and workflow-run commands, no-mistakes passes the repository slug from the recorded upstream remote or PR URL to `gh`, so daemon-run commands do not depend on the daemon's current working directory.
+For PR and workflow-run commands, no-mistakes passes the repository slug from the provider-backed PR target (the recorded remote, configured GitHub target, or PR URL) to `gh`, so daemon-run commands do not depend on the daemon's current working directory.
 
 **What you get:**
 
@@ -197,7 +197,7 @@ When the upstream hostname is not `github.com`, `no-mistakes` consults gh's conf
 Running `gh auth login --hostname your-ghe.example.com` is enough to make detection succeed; if `gh` is not configured for the host, detection fails closed and the upstream is treated as unsupported.
 
 On GHE, `gh --repo` expects a host-prefixed slug in the form `host/owner/name`.
-`no-mistakes` builds that automatically from the recorded upstream remote or PR URL, so daemon-run `gh` commands resolve the right repository regardless of the daemon's working directory.
+`no-mistakes` builds that automatically from the provider-backed target URL (the recorded remote, configured GitHub target, or PR URL), so daemon-run `gh` commands resolve the right repository regardless of the daemon's working directory.
 The fork owner extracted from the fork URL keeps the plain `owner/name` form because that side only feeds `--head owner:branch`.
 
 ### Self-hosted GitLab
