@@ -157,12 +157,22 @@ func (i Inspector) activeAgentSteps() ([]activeAgentStep, error) {
 	}
 	runs, err := i.DB.GetActiveRuns()
 	if err != nil {
+		// This advisory preflight can run before the daemon's writable DB open
+		// applies additive migrations. Degrade only expected old-schema misses so
+		// daemon startup can perform those migrations; genuine DB errors still
+		// fail closed.
+		if preMigrationSchemaError(err, "runs") {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("gate execution context: list active runs: %w", err)
 	}
 	var out []activeAgentStep
 	for _, run := range runs {
 		steps, err := i.DB.GetStepsByRun(run.ID)
 		if err != nil {
+			if preMigrationSchemaError(err, "step_results") {
+				return nil, nil
+			}
 			return nil, fmt.Errorf("gate execution context: list steps for active run: %w", err)
 		}
 		for _, step := range steps {
@@ -177,6 +187,21 @@ func (i Inspector) activeAgentSteps() ([]activeAgentStep, error) {
 		}
 	}
 	return out, nil
+}
+
+func preMigrationSchemaError(err error, tables ...string) bool {
+	message := err.Error()
+	if !strings.Contains(message, "no such column: ") {
+		return false
+	}
+	for _, table := range tables {
+		for _, column := range db.MigrationColumns(table) {
+			if strings.Contains(message, "no such column: "+column) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func activeStepStatus(status types.StepStatus) bool {

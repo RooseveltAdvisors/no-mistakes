@@ -1,5 +1,7 @@
 package db
 
+import "strings"
+
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS repos (
     id             TEXT PRIMARY KEY,
@@ -208,4 +210,23 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN workload_files INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
+}
+
+// MigrationColumns returns the columns that migrationStatements add to the
+// named table. Read-side callers that must tolerate pre-migration schemas
+// derive their expected-missing-column allowlist from here instead of
+// hardcoding names, so future additive migrations extend it automatically.
+func MigrationColumns(table string) []string {
+	return migrationAddedColumns(migrationStatements, table)
+}
+
+func migrationAddedColumns(statements []string, table string) []string {
+	var columns []string
+	for _, statement := range statements {
+		fields := strings.Fields(statement)
+		if len(fields) >= 6 && fields[0] == "ALTER" && fields[1] == "TABLE" && fields[2] == table && fields[3] == "ADD" && fields[4] == "COLUMN" {
+			columns = append(columns, fields[5])
+		}
+	}
+	return columns
 }

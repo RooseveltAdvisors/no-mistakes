@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -88,6 +89,27 @@ func TestOpenCreatesSchema(t *testing.T) {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
+	}
+}
+
+func TestMigrationColumnsDerivedFromMigrationStatements(t *testing.T) {
+	for _, column := range []string{"ci_ready_no_ci", "terminal_head_verified_at", "resolved_agent_route"} {
+		if !slices.Contains(MigrationColumns("runs"), column) {
+			t.Fatalf("MigrationColumns(runs) missing %q", column)
+		}
+	}
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "auto_fix_limit"} {
+		if !slices.Contains(MigrationColumns("step_results"), column) {
+			t.Fatalf("MigrationColumns(step_results) missing %q", column)
+		}
+	}
+	if slices.Contains(MigrationColumns("runs"), "status") {
+		t.Fatal("MigrationColumns(runs) includes base-schema column status")
+	}
+
+	extended := append(append([]string{}, migrationStatements...), `ALTER TABLE runs ADD COLUMN future_probe INTEGER`)
+	if !slices.Contains(migrationAddedColumns(extended, "runs"), "future_probe") {
+		t.Fatal("migrationAddedColumns does not derive future additive columns")
 	}
 }
 

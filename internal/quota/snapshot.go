@@ -6,6 +6,7 @@
 package quota
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,8 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
-	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 // Snapshot is the normalized subset of quota-axi --json used for routing.
@@ -179,15 +180,14 @@ func DefaultFetch(ctx context.Context, bin string, providers []string) (*Snapsho
 		args = append(args, "--provider", strings.Join(providers, ","))
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
-	winproc.Harden(cmd)
-	out, err := cmd.Output()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	shellenv.ConfigureShellCommand(cmd)
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		var stderr string
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		if stderr != "" {
-			return nil, fmt.Errorf("run %s: %w: %s", bin, err, stderr)
+		stderrText := strings.TrimSpace(stderr.String())
+		if stderrText != "" {
+			return nil, fmt.Errorf("run %s: %w: %s", bin, err, stderrText)
 		}
 		return nil, fmt.Errorf("run %s: %w", bin, err)
 	}
@@ -317,10 +317,13 @@ func rankKnownAvailability(c Candidate, prov ProviderSnapshot, index int, d *Dec
 		d.Reason = fmt.Sprintf("runnable; quota rate_limited (%s); not treated as healthy; config order %d", errText, index)
 		return
 	}
-	if state != "" && state != "fresh" {
+	if state != "fresh" {
 		d.RankGroup = 2
 		d.Eligible = true
 		d.Pace = "unknown"
+		if state == "" {
+			state = "unknown"
+		}
 		d.Reason = fmt.Sprintf("runnable; quota state %q; not treated as healthy; config order %d", state, index)
 		return
 	}

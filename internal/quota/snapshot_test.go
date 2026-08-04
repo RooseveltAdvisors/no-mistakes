@@ -172,6 +172,33 @@ func TestSelect_UnknownAndStaleNeverTreatedAsHealthy(t *testing.T) {
 	}
 }
 
+func TestSelect_MissingStateStatusIsUnknown(t *testing.T) {
+	snap := &Snapshot{
+		SchemaVersion: 3,
+		Providers: []ProviderSnapshot{{
+			Provider: "codex",
+			QuotaSemantics: QuotaSemantics{
+				Status: "known",
+				EffectiveAvailability: []EffectiveAvailability{{
+					Scope:                     "all_models",
+					Status:                    "known",
+					EffectivePercentRemaining: floatPtr(99),
+				}},
+			},
+		}},
+	}
+	sel := Select([]Candidate{{
+		Name: "codex", Agent: types.AgentCodex, QuotaProvider: "codex", Runnable: true,
+	}}, snap, nil)
+	decision := sel.Decisions[0]
+	if decision.RankGroup != 2 || decision.Remaining != nil {
+		t.Fatalf("missing state.status treated as healthy: %+v", decision)
+	}
+	if !strings.Contains(decision.Reason, `quota state "unknown"`) {
+		t.Fatalf("missing state.status reason = %q, want unknown", decision.Reason)
+	}
+}
+
 func TestSelect_PressuredExhaustedRanksBelowHeadroom(t *testing.T) {
 	snap := &Snapshot{
 		SchemaVersion: 3,

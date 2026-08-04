@@ -2,11 +2,15 @@ package gatecontext_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -97,6 +101,72 @@ func TestInspectorRejectsRelocatedAndSymlinkedManagedRoots(t *testing.T) {
 	if !got.Nested || !got.ManagedGit {
 		t.Fatalf("symlinked relocated root not rejected: %+v", got)
 	}
+}
+
+func TestInspectorPreMigrationSchemaDegradesActiveAgentSteps(t *testing.T) {
+	for _, table := range []string{"runs", "step_results"} {
+		for _, column := range db.MigrationColumns(table) {
+			t.Run(table+"/"+column, func(t *testing.T) {
+				inspector := preMigrationInspector(t, table, column, table == "step_results")
+				got, err := inspector.Inspect(context.Background(), gatecontext.Request{})
+				if err != nil {
+					t.Fatalf("Inspect() on pre-migration %s.%s: %v", table, column, err)
+				}
+				if got.Nested {
+					t.Fatalf("pre-migration %s.%s classified as nested: %+v", table, column, got)
+				}
+			})
+		}
+	}
+}
+
+func TestInspectorPreMigrationSchemaPropagatesUnexpectedMissingColumn(t *testing.T) {
+	inspector := preMigrationInspector(t, "runs", "status", false)
+	_, err := inspector.Inspect(context.Background(), gatecontext.Request{})
+	if err == nil || !strings.Contains(err.Error(), "no such column: status") {
+		t.Fatalf("Inspect() error = %v, want unexpected missing status column", err)
+	}
+}
+
+func preMigrationInspector(t *testing.T, table, column string, withActiveRun bool) gatecontext.Inspector {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "old.sqlite")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(): %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw DB: %v", err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE ` + table + ` DROP COLUMN ` + column); err != nil {
+		raw.Close()
+		t.Fatalf("drop %s.%s: %v", table, column, err)
+	}
+	if withActiveRun {
+		if _, err := raw.Exec(`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at) VALUES ('run-1', 'repo-1', 'feature', 'head', 'base', 'running', 1, 1)`); err != nil {
+			raw.Close()
+			t.Fatalf("insert active run: %v", err)
+		}
+		if _, err := raw.Exec(`INSERT INTO step_results (id, run_id, step_name, step_order, status) VALUES ('step-1', 'run-1', 'review', 1, 'running')`); err != nil {
+			raw.Close()
+			t.Fatalf("insert active step: %v", err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw DB: %v", err)
+	}
+
+	readonly, err := db.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("OpenReadOnly(): %v", err)
+	}
+	t.Cleanup(func() { readonly.Close() })
+	return gatecontext.Inspector{DB: readonly, Paths: paths.WithRoot(t.TempDir())}
 }
 
 func TestInspectorUsesAuthenticatedProcessAncestryAfterCWDChange(t *testing.T) {
