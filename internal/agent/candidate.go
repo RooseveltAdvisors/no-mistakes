@@ -8,8 +8,7 @@ import (
 // labeledCandidate wraps a concrete backend agent with an operator-facing
 // subscription candidate label (for example "kimi" or "grok"). Name() returns
 // the label so fallback logs and attempt telemetry stay inspectable, while
-// session provider matching still accepts the underlying backend name so
-// review/fixer session continuity is preserved for session-capable adapters.
+// session provider matching accepts both the candidate label and backend name.
 type labeledCandidate struct {
 	inner Agent
 	label string
@@ -28,10 +27,8 @@ func (a *labeledCandidate) Name() string { return a.label }
 
 func (a *labeledCandidate) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	result, err := a.inner.Run(ctx, opts)
-	if result != nil && result.Provider == "" {
-		// Persist the backend identity (codex/pi/...) so session resume keys
-		// remain adapter-native rather than the operator label.
-		result.Provider = a.inner.Name()
+	if result != nil {
+		result.Provider = a.label
 	}
 	return result, err
 }
@@ -43,9 +40,9 @@ func (a *labeledCandidate) SupportsSessionResume() bool {
 }
 
 func (a *labeledCandidate) SupportsSessionProvider(provider string) bool {
-	// Session identities are always backend-native (codex/claude/...). The
-	// operator label is for logs only, even when it happens to equal the
-	// backend name (candidate name "codex" wrapping agent codex).
+	if provider == a.label {
+		return SupportsSessionResume(a.inner)
+	}
 	return SupportsSessionProvider(a.inner, provider)
 }
 

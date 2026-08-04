@@ -67,7 +67,7 @@ type Attempt struct {
 	SessionFallback bool
 }
 
-// SessionRef identifies a durable adapter-native session for RunOpts.Session.
+// SessionRef identifies a durable adapter-native or candidate session for RunOpts.Session.
 type SessionRef struct {
 	// ID is the adapter-native session identity to resume. Empty starts a
 	// new resumable session whose identity is reported via Result.SessionID.
@@ -248,8 +248,9 @@ type Result struct {
 	// ModelProvider is the provider that served the model (e.g. "openai",
 	// "anthropic"), when the adapter can report it. Instrumentation only.
 	ModelProvider string
-	// Provider is the adapter provider that served this invocation. It lets
-	// fallback wrappers persist a session against the provider that minted it.
+	// Provider is the adapter provider or labeled candidate that served this
+	// invocation. It lets fallback wrappers persist a session against the identity
+	// that minted it.
 	Provider string
 	// Metrics is the bounded per-invocation activity evidence the adapter
 	// extracted from its event stream (round-trips, tool calls + categories,

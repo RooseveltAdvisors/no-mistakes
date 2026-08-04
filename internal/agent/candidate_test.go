@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -19,10 +20,8 @@ func TestWithCandidateLabel_PreservesBackendSessionProvider(t *testing.T) {
 	if !SupportsSessionProvider(ag, "codex") {
 		t.Fatal("expected backend provider codex to match")
 	}
-	// A label that is not the backend name is not a session provider unless the
-	// backend itself would accept it.
-	if SupportsSessionProvider(ag, "codex-sub") {
-		t.Fatal("distinct label must not be treated as a session provider")
+	if !SupportsSessionProvider(ag, "codex-sub") {
+		t.Fatal("candidate label must identify its session")
 	}
 	same := WithCandidateLabel(inner, "codex")
 	if !SupportsSessionProvider(same, "codex") {
@@ -32,13 +31,48 @@ func TestWithCandidateLabel_PreservesBackendSessionProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Provider != "codex" {
-		t.Fatalf("Provider = %q, want codex", res.Provider)
+	if res.Provider != "codex-sub" {
+		t.Fatalf("Provider = %q, want codex-sub", res.Provider)
 	}
 	if got := DescribeAgent(ag); got != "codex-sub(codex)" {
 		t.Fatalf("DescribeAgent = %q", got)
 	}
 	if BackendName(ag) != "codex" {
 		t.Fatalf("BackendName = %q", BackendName(ag))
+	}
+}
+
+func TestFallbackAgent_ResumesExactLabeledCandidate(t *testing.T) {
+	first := &fallbackTestAgent{
+		name:      "pi",
+		resumable: true,
+		run:       func() (*Result, error) { return nil, errors.New("agent start: unavailable") },
+	}
+	second := &fallbackTestAgent{
+		name:      "pi",
+		resumable: true,
+		run:       func() (*Result, error) { return &Result{Text: "ok", SessionID: "grok-session"}, nil },
+	}
+	ag := NewFallback([]Agent{
+		WithCandidateLabel(first, "kimi"),
+		WithCandidateLabel(second, "grok"),
+	})
+
+	result, err := ag.Run(context.Background(), RunOpts{})
+	if err != nil {
+		t.Fatalf("initial fallback: %v", err)
+	}
+	if result.Provider != "grok" {
+		t.Fatalf("initial provider = %q, want grok", result.Provider)
+	}
+
+	if _, err := ag.Run(context.Background(), RunOpts{Session: &SessionRef{ID: result.SessionID, Agent: result.Provider}}); err != nil {
+		t.Fatalf("resume fallback: %v", err)
+	}
+	if first.calls != 1 {
+		t.Fatalf("first candidate calls = %d, want 1", first.calls)
+	}
+	if second.calls != 2 {
+		t.Fatalf("second candidate calls = %d, want 2", second.calls)
 	}
 }

@@ -1253,9 +1253,16 @@ func containsPathSeparatorForProbe(path, goos string) bool {
 	return strings.ContainsRune(path, '/')
 }
 
-// AgentArgs returns extra CLI args for the configured native agent, as declared in
-// agent_args_override. Returns nil when no override is set for this agent.
+// AgentArgs returns extra CLI args for the active native agent. A resolved
+// subscription route supplies the selected candidate's args; otherwise the
+// configured agent_args_override entry is used.
 func (c *Config) AgentArgs() []string {
+	if c.SubscriptionRoute != nil && len(c.SubscriptionRoute.Ordered) > 0 {
+		primary := c.SubscriptionRoute.Ordered[0]
+		if primary.Agent == c.Agent {
+			return append([]string(nil), primary.Args...)
+		}
+	}
 	return c.AgentArgsFor(c.Agent)
 }
 

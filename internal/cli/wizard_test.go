@@ -154,6 +154,37 @@ func TestWizardAgentSuggester_ForwardsAgentArgsOverride(t *testing.T) {
 	}
 }
 
+func TestWizardAgentSuggester_ForwardsResolvedSubscriptionArgs(t *testing.T) {
+	var gotArgs []string
+	suggester := newWizardAgentSuggester(
+		&config.Config{Agent: types.AgentSubscription},
+		"/tmp/repo",
+		func(_ context.Context, cfg *config.Config) error {
+			cfg.Agent = types.AgentPi
+			cfg.SubscriptionRoute = &config.SubscriptionRoute{
+				Ordered: []config.RoutedSubscriptionCandidate{{
+					Name:  "kimi",
+					Agent: types.AgentPi,
+					Args:  []string{"--provider", "kimi-coding", "--model", "k3"},
+				}},
+			}
+			return nil
+		},
+		func(_ types.AgentName, _ string, args []string, _ agent.Options) (agent.Agent, error) {
+			gotArgs = append([]string(nil), args...)
+			return &fakeSuggesterAgent{}, nil
+		},
+	)
+	defer suggester.Close()
+
+	if err := suggester.ensure(context.Background()); err != nil {
+		t.Fatalf("ensure failed: %v", err)
+	}
+	if want := []string{"--provider", "kimi-coding", "--model", "k3"}; !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("new agent args = %v, want %v", gotArgs, want)
+	}
+}
+
 func TestWizardAgentSuggester_ForwardsACPRegistryOverrides(t *testing.T) {
 	var gotOpts agent.Options
 	suggester := newWizardAgentSuggester(
