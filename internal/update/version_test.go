@@ -65,3 +65,13 @@ func TestCompareVersionsRejectsInvalid(t *testing.T) {
 		})
 	}
 }
+
+func TestIsDevVersionDirtyGitDescribe(t *testing.T) {
+	for _, version := range []string{"v1.41.2-dirty", "v1.41.2-24-gaa46306-dirty"} {
+		t.Run(version, func(t *testing.T) {
+			if !isDevVersion(version) {
+				t.Fatalf("isDevVersion(%q) = false, want true", version)
+			}
+		})
+	}
+}

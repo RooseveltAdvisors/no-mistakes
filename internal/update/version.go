@@ -100,6 +100,9 @@ func isDevVersion(version string) bool {
 	if version == "" || version == "dev" {
 		return true
 	}
+	if strings.HasSuffix(strings.TrimSpace(version), "-dirty") {
+		return true
+	}
 	_, err := parseVersion(version)
 	return err != nil
 }

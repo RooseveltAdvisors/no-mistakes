@@ -1317,7 +1317,7 @@ func parseSubscriptionAgents(raw *subscriptionAgentsRaw) (SubscriptionAgentsConf
 		QuotaAXIPath: strings.TrimSpace(raw.QuotaAXIPath),
 		Candidates:   make([]SubscriptionCandidate, 0, len(raw.Candidates)),
 	}
-	for i, c := range raw.Candidates {
+	for _, c := range raw.Candidates {
 		name := strings.TrimSpace(c.Name)
 		agentName := types.AgentName(strings.TrimSpace(c.Agent))
 		quotaProvider := strings.TrimSpace(c.QuotaProvider)
@@ -1330,8 +1330,6 @@ func parseSubscriptionAgents(raw *subscriptionAgentsRaw) (SubscriptionAgentsConf
 			Provider:      strings.TrimSpace(c.Provider),
 			Model:         strings.TrimSpace(c.Model),
 		})
-		// Keep index in errors stable even before validateSubscriptionAgents.
-		_ = i
 	}
 	if err := validateSubscriptionAgents(out); err != nil {
 		// Allow empty/absent block without agent: subscription; only validate

@@ -196,7 +196,7 @@ func TestUpdaterRunDoesNotReplacePostReleaseBuildWithBaseTag(t *testing.T) {
 }
 
 func TestUpdaterDevelopmentVersionsSkipSelfUpdate(t *testing.T) {
-	for _, version := range []string{"", "dev", "source-build"} {
+	for _, version := range []string{"", "dev", "source-build", "v1.41.2-dirty", "v1.41.2-24-gaa46306-dirty"} {
 		t.Run(version, func(t *testing.T) {
 			stdout := new(bytes.Buffer)
 			u := &updater{currentVersion: version, stdout: stdout}
@@ -1064,6 +1064,8 @@ func TestUpdaterCachedNoticeVersionOrdering(t *testing.T) {
 		{name: "ordinary prerelease semantics", current: "v1.42.0-beta.1", latest: "v1.42.0", wantLatest: "v1.42.0"},
 		{name: "malformed development build", current: "source-build", latest: "v1.42.0"},
 		{name: "dev build", current: "dev", latest: "v1.42.0"},
+		{name: "dirty post-release build skips self-update", current: "v1.41.2-24-gaa46306-dirty", latest: "v1.41.2"},
+		{name: "dirty exact-tag build skips self-update", current: "v1.41.2-dirty", latest: "v1.41.2"},
 	}
 
 	for _, tt := range tests {
