@@ -93,6 +93,123 @@ func TestUpdaterCheckLatestAndRefreshCache(t *testing.T) {
 	}
 }
 
+func TestUpdaterGitDescribeUpdatePlanning(t *testing.T) {
+	tests := []struct {
+		name       string
+		current    string
+		latest     string
+		wantUpdate bool
+	}{
+		{name: "post release is newer than base tag", current: "v1.41.2-24-gaa46306", latest: "v1.41.2"},
+		{name: "equal base tag", current: "v1.41.2", latest: "v1.41.2"},
+		{name: "genuinely newer release", current: "v1.41.2-24-gaa46306", latest: "v1.42.0", wantUpdate: true},
+		{name: "ordinary prerelease upgrades to stable", current: "v1.42.0-beta.1", latest: "v1.42.0", wantUpdate: true},
+		{name: "stable does not downgrade to prerelease", current: "v1.42.0", latest: "v1.42.0-beta.1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archiveName := releaseArchiveName("no-mistakes", tt.latest, platformSpec{GOOS: "linux", GOARCH: "amd64"})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"tag_name":%q,"assets":[{"name":%q,"browser_download_url":"http://example.com/archive"},{"name":"checksums.txt","browser_download_url":"http://example.com/checksums"}]}`, tt.latest, archiveName)
+			}))
+			defer server.Close()
+
+			u := &updater{
+				appName:        "no-mistakes",
+				repo:           "kunchenguid/no-mistakes",
+				currentVersion: tt.current,
+				platform:       platformSpec{GOOS: "linux", GOARCH: "amd64"},
+				apiBaseURL:     server.URL,
+				httpClient:     server.Client(),
+			}
+			plan, err := u.checkLatest(context.Background())
+			if err != nil {
+				t.Fatalf("checkLatest error = %v", err)
+			}
+			if plan.UpdateAvailable != tt.wantUpdate {
+				t.Fatalf("UpdateAvailable = %v, want %v (plan=%+v)", plan.UpdateAvailable, tt.wantUpdate, plan)
+			}
+		})
+	}
+}
+
+func TestUpdaterRunDoesNotReplacePostReleaseBuildWithBaseTag(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.Close()
+
+	downloads := 0
+	archiveName := "no-mistakes-v1.41.2-linux-amd64.tar.gz"
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/kunchenguid/no-mistakes/releases/latest":
+			fmt.Fprintf(w, `{"tag_name":"v1.41.2","assets":[{"name":%q,"browser_download_url":%q},{"name":"checksums.txt","browser_download_url":%q}]}`, archiveName, server.URL+"/archive", server.URL+"/checksums")
+		default:
+			downloads++
+			http.Error(w, "must not download", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	execPath := filepath.Join(t.TempDir(), "no-mistakes")
+	if err := os.WriteFile(execPath, []byte("house-build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stdout := new(bytes.Buffer)
+	u := &updater{
+		appName:        "no-mistakes",
+		repo:           "kunchenguid/no-mistakes",
+		currentVersion: "v1.41.2-24-gaa46306",
+		platform:       platformSpec{GOOS: "linux", GOARCH: "amd64"},
+		apiBaseURL:     server.URL,
+		httpClient:     server.Client(),
+		cachePath:      p.UpdateCheckFile(),
+		executablePath: execPath,
+		stdout:         stdout,
+		paths:          p,
+		now:            time.Now,
+	}
+	if err := u.run(context.Background()); err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if downloads != 0 {
+		t.Fatalf("lower base release triggered %d download requests", downloads)
+	}
+	content, err := os.ReadFile(execPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "house-build" {
+		t.Fatalf("executable was replaced with %q", content)
+	}
+	if !strings.Contains(stdout.String(), "already up to date") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestUpdaterDevelopmentVersionsSkipSelfUpdate(t *testing.T) {
+	for _, version := range []string{"", "dev", "source-build"} {
+		t.Run(version, func(t *testing.T) {
+			stdout := new(bytes.Buffer)
+			u := &updater{currentVersion: version, stdout: stdout}
+			if err := u.run(context.Background()); err != nil {
+				t.Fatalf("run error = %v", err)
+			}
+			if !strings.Contains(stdout.String(), "self-update unavailable for development builds") {
+				t.Fatalf("stdout = %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestUpdaterRunReplacesExecutable(t *testing.T) {
 	allowInsecureDownloads = true
 	t.Cleanup(func() { allowInsecureDownloads = false })
@@ -931,6 +1048,47 @@ func TestUpdaterMaybeNotifyAndCheck(t *testing.T) {
 		if spawned {
 			t.Fatalf("%v should not spawn background refresh", versionArgs)
 		}
+	}
+}
+
+func TestUpdaterCachedNoticeVersionOrdering(t *testing.T) {
+	tests := []struct {
+		name       string
+		current    string
+		latest     string
+		wantLatest string
+	}{
+		{name: "exact git describe shape does not downgrade", current: "v1.41.2-24-gaa46306", latest: "v1.41.2"},
+		{name: "equal base tag", current: "v1.41.2", latest: "v1.41.2"},
+		{name: "genuinely newer release", current: "v1.41.2-24-gaa46306", latest: "v1.42.0", wantLatest: "v1.42.0"},
+		{name: "ordinary prerelease semantics", current: "v1.42.0-beta.1", latest: "v1.42.0", wantLatest: "v1.42.0"},
+		{name: "malformed development build", current: "source-build", latest: "v1.42.0"},
+		{name: "dev build", current: "dev", latest: "v1.42.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cachePath := filepath.Join(t.TempDir(), "update-check.json")
+			if err := writeCache(cachePath, &checkCache{CheckedAt: time.Now(), LatestVersion: tt.latest}); err != nil {
+				t.Fatal(err)
+			}
+			stderr := new(bytes.Buffer)
+			u := &updater{
+				appName:        "no-mistakes",
+				currentVersion: tt.current,
+				cachePath:      cachePath,
+				stderr:         stderr,
+				now:            time.Now,
+			}
+
+			u.maybeNotifyAndCheck([]string{"status"})
+			if got := u.cachedLatestVersion(); got != tt.wantLatest {
+				t.Fatalf("cachedLatestVersion() = %q, want %q", got, tt.wantLatest)
+			}
+			if got := strings.Contains(stderr.String(), "A new version"); got != (tt.wantLatest != "") {
+				t.Fatalf("notice = %v, want %v; stderr = %q", got, tt.wantLatest != "", stderr.String())
+			}
+		})
 	}
 }
 

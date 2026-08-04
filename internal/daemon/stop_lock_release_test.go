@@ -62,7 +62,7 @@ func TestStopDetachedDaemonReleasesShutdownConnectionBeforeWaiting(t *testing.T)
 	daemonHealthCheck = func(*paths.Paths) (bool, error) { return !drained.Load(), nil }
 	t.Cleanup(func() { daemonHealthCheck = oldHealth })
 
-	if err := stopDetachedDaemon(p, daemonPIDFile{}); err != nil {
+	if err := stopDetachedDaemon(p); err != nil {
 		t.Fatalf("stopDetachedDaemon: %v", err)
 	}
 	if !drained.Load() {
@@ -132,7 +132,7 @@ func TestWaitForDaemonStopWaitsForSingletonLockRelease(t *testing.T) {
 	}()
 
 	started := time.Now()
-	if err := waitForDaemonStop(p, stopping); err != nil {
+	if err := waitForDaemonStop(p, daemonInstance{pid: pid, startedAt: startedAt}); err != nil {
 		t.Fatalf("waitForDaemonStop: %v", err)
 	}
 	elapsed := time.Since(started)

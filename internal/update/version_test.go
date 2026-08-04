@@ -25,6 +25,12 @@ func TestCompareVersions(t *testing.T) {
 		{name: "prerelease with build metadata", a: "v1.2.3-rc1+abc", b: "v1.2.3-rc1+def", wantCmp: 0},
 		{name: "different prerelease lengths", a: "v1.2.3-alpha.1", b: "v1.2.3-alpha", wantCmp: 1},
 		{name: "numeric prerelease less than string", a: "v1.2.3-1", b: "v1.2.3-alpha", wantCmp: -1},
+		{name: "git describe post release newer than base", a: "v1.41.2-24-gaa46306", b: "v1.41.2", wantCmp: 1},
+		{name: "base older than git describe post release", a: "v1.41.2", b: "v1.41.2-24-gaa46306", wantCmp: -1},
+		{name: "git describe exact tag equals base", a: "v1.41.2-0-g867d64d", b: "v1.41.2", wantCmp: 0},
+		{name: "later git describe distance is newer", a: "v1.41.2-24-gaa46306", b: "v1.41.2-12-g1234abc", wantCmp: 1},
+		{name: "genuinely newer release beats post release", a: "v1.42.0", b: "v1.41.2-24-gaa46306", wantCmp: 1},
+		{name: "post release beats ordinary prerelease", a: "v1.41.2-24-gaa46306", b: "v1.41.2-rc.1", wantCmp: 1},
 	}
 
 	for _, tt := range tests {
@@ -41,7 +47,21 @@ func TestCompareVersions(t *testing.T) {
 }
 
 func TestCompareVersionsRejectsInvalid(t *testing.T) {
-	if _, err := compareVersions("dev", "v1.2.3"); err == nil {
-		t.Fatal("compareVersions should reject non-semver input")
+	for _, version := range []string{"", "dev", "source-build"} {
+		t.Run(version, func(t *testing.T) {
+			if _, err := compareVersions(version, "v1.2.3"); err == nil {
+				t.Fatalf("compareVersions should reject %q", version)
+			}
+			if !isDevVersion(version) {
+				t.Fatalf("isDevVersion(%q) = false, want true", version)
+			}
+		})
+	}
+	for _, version := range []string{"v1.2.3", "v1.2.3-beta.1", "v1.41.2-24-gaa46306"} {
+		t.Run("release_"+version, func(t *testing.T) {
+			if isDevVersion(version) {
+				t.Fatalf("isDevVersion(%q) = true, want false", version)
+			}
+		})
 	}
 }

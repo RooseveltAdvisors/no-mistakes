@@ -7,10 +7,11 @@ import (
 )
 
 type semVersion struct {
-	major      int
-	minor      int
-	patch      int
-	prerelease []string
+	major              int
+	minor              int
+	patch              int
+	postReleaseCommits int
+	prerelease         []string
 }
 
 func compareVersions(a, b string) (int, error) {
@@ -62,16 +63,37 @@ func parseVersion(raw string) (semVersion, error) {
 	}
 
 	if pre != "" {
-		idents := strings.Split(pre, ".")
-		for _, ident := range idents {
-			if ident == "" {
-				return semVersion{}, fmt.Errorf("parse version %q: empty prerelease segment", raw)
+		if commits, ok := gitDescribeDistance(pre); ok {
+			v.postReleaseCommits = commits
+		} else {
+			idents := strings.Split(pre, ".")
+			for _, ident := range idents {
+				if ident == "" {
+					return semVersion{}, fmt.Errorf("parse version %q: empty prerelease segment", raw)
+				}
+				v.prerelease = append(v.prerelease, ident)
 			}
-			v.prerelease = append(v.prerelease, ident)
 		}
 	}
 
 	return v, nil
+}
+
+func gitDescribeDistance(s string) (int, bool) {
+	distance, hash, ok := strings.Cut(s, "-g")
+	if !ok || distance == "" || hash == "" || strings.Contains(hash, "-") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(distance)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	for _, r := range hash {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return 0, false
+		}
+	}
+	return n, true
 }
 
 func isDevVersion(version string) bool {
@@ -91,6 +113,16 @@ func (v semVersion) compare(other semVersion) int {
 	}
 	if diff := cmpInt(v.patch, other.patch); diff != 0 {
 		return diff
+	}
+	if v.postReleaseCommits > 0 || other.postReleaseCommits > 0 {
+		switch {
+		case v.postReleaseCommits == 0:
+			return -1
+		case other.postReleaseCommits == 0:
+			return 1
+		default:
+			return cmpInt(v.postReleaseCommits, other.postReleaseCommits)
+		}
 	}
 
 	if len(v.prerelease) == 0 && len(other.prerelease) == 0 {
