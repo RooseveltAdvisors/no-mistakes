@@ -165,6 +165,37 @@ func quotaFloatPtr(value float64) *float64 {
 // FetchFunc loads one fresh quota-axi snapshot. Tests inject fakes.
 type FetchFunc func(ctx context.Context, bin string, providers []string) (*Snapshot, error)
 
+const quotaStderrLimit = 32 << 10
+
+type boundedStderr struct {
+	buf     bytes.Buffer
+	omitted int64
+}
+
+func (w *boundedStderr) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := quotaStderrLimit - w.buf.Len()
+	if remaining > 0 {
+		keep := len(p)
+		if keep > remaining {
+			keep = remaining
+		}
+		_, _ = w.buf.Write(p[:keep])
+		w.omitted += int64(len(p) - keep)
+	} else {
+		w.omitted += int64(len(p))
+	}
+	return written, nil
+}
+
+func (w *boundedStderr) String() string {
+	text := w.buf.String()
+	if w.omitted > 0 {
+		text += fmt.Sprintf("\n... (%d stderr bytes truncated)", w.omitted)
+	}
+	return text
+}
+
 // DefaultFetch runs `quota-axi --json` (optionally scoped with --provider).
 func DefaultFetch(ctx context.Context, bin string, providers []string) (*Snapshot, error) {
 	if strings.TrimSpace(bin) == "" {
@@ -180,7 +211,7 @@ func DefaultFetch(ctx context.Context, bin string, providers []string) (*Snapsho
 		args = append(args, "--provider", strings.Join(providers, ","))
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
-	var stderr bytes.Buffer
+	var stderr boundedStderr
 	cmd.Stderr = &stderr
 	shellenv.ConfigureShellCommand(cmd)
 	out, err := shellenv.OutputShellCommand(cmd)

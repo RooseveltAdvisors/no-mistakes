@@ -228,6 +228,9 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 		return "", false, nil
 	}
 	repo, err := i.DB.GetRepo(id)
+	if err != nil && preMigrationSchemaError(err, "repos") {
+		repo, err = i.DB.GetRepoBeforeForkMigration(id)
+	}
 	if err != nil {
 		return "", false, fmt.Errorf("gate execution context: verify managed gate: %w", err)
 	}

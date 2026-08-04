@@ -120,6 +120,23 @@ func (d *DB) GetRepo(id string) (*Repo, error) {
 	return r, nil
 }
 
+// GetRepoBeforeForkMigration reads the repository fields that predate the
+// additive fork_url migration. It is reserved for read-only startup preflight
+// after the normal GetRepo query confirms that exact migration is missing.
+func (d *DB) GetRepoBeforeForkMigration(id string) (*Repo, error) {
+	r := &Repo{}
+	err := d.sql.QueryRow(
+		`SELECT id, working_path, upstream_url, default_branch, created_at FROM repos WHERE id = ?`, id,
+	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.DefaultBranch, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get repo before fork migration: %w", err)
+	}
+	return r, nil
+}
+
 // GetRepoByPath returns a repo by its working path.
 func (d *DB) GetRepoByPath(workingPath string) (*Repo, error) {
 	r := &Repo{}

@@ -128,6 +128,57 @@ func TestInspectorPreMigrationSchemaPropagatesUnexpectedMissingColumn(t *testing
 	}
 }
 
+func TestInspectorPreForkSchemaRecognizesManagedGate(t *testing.T) {
+	f := newTopologyFixture(t)
+	readonly := reopenTopologyWithoutRepoColumn(t, f, "fork_url")
+
+	got, err := (gatecontext.Inspector{DB: readonly, Paths: f.p}).Inspect(
+		context.Background(), gatecontext.Request{CWD: f.managed},
+	)
+	if err != nil {
+		t.Fatalf("Inspect() without repos.fork_url: %v", err)
+	}
+	if !got.Nested || !got.ManagedGit {
+		t.Fatalf("pre-fork managed gate not recognized: %+v", got)
+	}
+}
+
+func TestInspectorPreForkSchemaPropagatesMissingBaseRepoColumn(t *testing.T) {
+	f := newTopologyFixture(t)
+	readonly := reopenTopologyWithoutRepoColumn(t, f, "default_branch")
+
+	_, err := (gatecontext.Inspector{DB: readonly, Paths: f.p}).Inspect(
+		context.Background(), gatecontext.Request{CWD: f.managed},
+	)
+	if err == nil || !strings.Contains(err.Error(), "no such column: default_branch") {
+		t.Fatalf("Inspect() error = %v, want missing base repo column", err)
+	}
+}
+
+func reopenTopologyWithoutRepoColumn(t *testing.T, f *topologyFixture, column string) *db.DB {
+	t.Helper()
+	if err := f.d.Close(); err != nil {
+		t.Fatalf("close migrated DB: %v", err)
+	}
+	raw, err := sql.Open("sqlite", f.p.DB())
+	if err != nil {
+		t.Fatalf("open raw DB: %v", err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE repos DROP COLUMN ` + column); err != nil {
+		raw.Close()
+		t.Fatalf("drop repos.%s: %v", column, err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw DB: %v", err)
+	}
+	readonly, err := db.OpenReadOnly(f.p.DB())
+	if err != nil {
+		t.Fatalf("OpenReadOnly(): %v", err)
+	}
+	t.Cleanup(func() { _ = readonly.Close() })
+	return readonly
+}
+
 func preMigrationInspector(t *testing.T, table, column string, withActiveRun bool) gatecontext.Inspector {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "old.sqlite")

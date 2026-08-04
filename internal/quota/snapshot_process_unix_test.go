@@ -23,6 +23,28 @@ func TestDefaultFetchPreservesStderr(t *testing.T) {
 	}
 }
 
+func TestDefaultFetchBoundsAndDrainsStderr(t *testing.T) {
+	helper := quotaFetchHelper(t)
+	t.Setenv("NM_QUOTA_FETCH_HELPER", "large-error")
+	_, err := DefaultFetch(context.Background(), helper, nil)
+	if err == nil {
+		t.Fatal("DefaultFetch() error = nil, want helper failure")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "quota helper stderr start") {
+		t.Fatalf("DefaultFetch() lost useful stderr prefix: %q", message)
+	}
+	if !strings.Contains(message, "stderr bytes truncated") {
+		t.Fatalf("DefaultFetch() did not disclose truncation: %q", message)
+	}
+	if strings.Contains(message, "quota helper stderr end") {
+		t.Fatalf("DefaultFetch() retained stderr beyond the bound: %d bytes", len(message))
+	}
+	if len(message) > quotaStderrLimit+512 {
+		t.Fatalf("DefaultFetch() error grew past stderr bound: %d bytes", len(message))
+	}
+}
+
 func TestDefaultFetchReapsGrandchildOnCleanExit(t *testing.T) {
 	helper := quotaFetchHelper(t)
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
@@ -59,6 +81,16 @@ func quotaFetchHelper(t *testing.T) string {
 case "$NM_QUOTA_FETCH_HELPER" in
   error)
     echo "quota helper stderr" >&2
+    exit 23
+    ;;
+  large-error)
+    echo "quota helper stderr start" >&2
+    i=0
+    while [ "$i" -lt 4096 ]; do
+      printf '0123456789abcdef' >&2
+      i=$((i + 1))
+    done
+    echo "quota helper stderr end" >&2
     exit 23
     ;;
   reap)
