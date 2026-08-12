@@ -12,7 +12,7 @@ import (
 
 // The Windows test leg is process-spawn bound: the git-backed packages run
 // thousands of git.exe invocations, and Defender real-time scanning taxes every
-// one. Untuned, the job ran 10-25 minutes against its 25-minute cap and was
+// one. Untuned, recent runs approached or exceeded the 25-minute cap and were
 // cancelled outright on real PRs. These tests pin the two properties that keep
 // that from silently coming back - the scan-exclusion step, and a per-binary Go
 // timeout well inside the job cap so a genuine hang lands as a goroutine dump
