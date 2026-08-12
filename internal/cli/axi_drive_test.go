@@ -145,6 +145,32 @@ func TestDriveRunDetectsTerminalStateAfterReconnect(t *testing.T) {
 	}
 }
 
+func TestDriveRun_TrustedNoCIEvidenceReturnsChecksPassed(t *testing.T) {
+	source := &scriptedRunStateSource{
+		subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+		runs: []*ipc.RunInfo{{
+			ID:          "run-1",
+			Status:      types.RunRunning,
+			CIReady:     true,
+			CIReadyNoCI: true,
+			Steps: []ipc.StepResultInfo{{
+				StepName: types.StepCI,
+				Status:   types.StepStatusRunning,
+			}},
+		}},
+	}
+	reconciler := newRunReconciler(source, "run-1")
+	defer reconciler.Close()
+
+	run, ciReady, err := driveRunWithReconciler(context.Background(), io.Discard, nil, reconciler, "run-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil || !ciReady {
+		t.Fatalf("drive result = %#v, ciReady=%v; want checks-passed handoff", run, ciReady)
+	}
+}
+
 func TestRunReconciler_ReconnectsBeforeReconcilingDisconnectedTransition(t *testing.T) {
 	firstEvents := make(chan ipc.Event)
 	secondEvents := make(chan ipc.Event)

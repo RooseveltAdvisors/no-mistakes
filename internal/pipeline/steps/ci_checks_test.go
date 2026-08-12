@@ -4,8 +4,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
+
+func TestTrustedNoCIReadyRequiresTrustedResolutionAndEmptyChecks(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *config.Config
+		checks []scm.Check
+		want   bool
+	}{
+		{name: "trusted declaration with no registered checks", config: &config.Config{NoCI: true}, want: true},
+		{name: "absent declaration", config: &config.Config{}, want: false},
+		{name: "invalid or untrusted declaration resolved fail closed", config: nil, want: false},
+		{name: "registered checks are evaluated normally", config: &config.Config{NoCI: true}, checks: []scm.Check{{Name: "build", Bucket: scm.CheckBucketPending}}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := trustedNoCIReady(tt.config, tt.checks); got != tt.want {
+				t.Fatalf("trustedNoCIReady() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestAllChecksPassedFailsClosed(t *testing.T) {
 	tests := []struct {

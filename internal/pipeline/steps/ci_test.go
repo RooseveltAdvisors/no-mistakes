@@ -700,8 +700,8 @@ func TestCIStep_EmptyChecksWithoutNoCIStaysNotReadyPastOldGracePeriod(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dbRun.CIReadyAt != nil {
-		t.Fatalf("expected CI readiness unset without no_ci, got %v", *dbRun.CIReadyAt)
+	if dbRun.CIReadyAt != nil || dbRun.CIReadyNoCI {
+		t.Fatalf("expected CI readiness unset without no_ci, got at=%v no_ci=%v", dbRun.CIReadyAt, dbRun.CIReadyNoCI)
 	}
 }
 
@@ -721,7 +721,12 @@ func TestCIStep_EmptyChecksWithTrustedNoCIBecomesReady(t *testing.T) {
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
 	sctx.Config.CITimeout = 10 * time.Second
-	sctx.Config.NoCI = true
+	trusted, err := config.LoadRepoFromBytes([]byte("no_ci: true\n"))
+	if err != nil {
+		t.Fatalf("trusted config parse: %v", err)
+	}
+	effective := config.EffectiveRepoConfig(&config.RepoConfig{}, trusted, false)
+	sctx.Config = config.Merge(&config.GlobalConfig{}, effective)
 
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
@@ -736,7 +741,7 @@ func TestCIStep_EmptyChecksWithTrustedNoCIBecomesReady(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, err := step.Execute(sctx)
+	_, err = step.Execute(sctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected continued monitoring after declared no-CI ready, got %v", err)
 	}
@@ -760,8 +765,51 @@ func TestCIStep_EmptyChecksWithTrustedNoCIBecomesReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dbRun.CIReadyAt == nil {
-		t.Fatal("expected CI readiness persisted for declared no_ci")
+	if dbRun.CIReadyAt == nil || !dbRun.CIReadyNoCI {
+		t.Fatalf("expected declared no_ci readiness evidence persisted, got at=%v no_ci=%v", dbRun.CIReadyAt, dbRun.CIReadyNoCI)
+	}
+}
+
+func TestCIStep_InvalidTrustedNoCIDeclarationStaysNotReady(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	if _, err := config.LoadRepoFromBytes([]byte("no_ci: definitely-not-a-bool\n")); err == nil {
+		t.Fatal("invalid no_ci declaration must fail trusted-config validation")
+	}
+	// An invalid trusted config is not resolved into Config.NoCI. The pushed
+	// branch's declaration is likewise discarded by the trust boundary.
+	effective := config.EffectiveRepoConfig(&config.RepoConfig{NoCI: true}, nil, false)
+	resolved := config.Merge(&config.GlobalConfig{}, effective)
+	if resolved.NoCI {
+		t.Fatal("invalid or untrusted no_ci declaration must resolve false")
+	}
+
+	env := fakeCIGH(t, "OPEN", "[]")
+	prURL := "https://github.com/test/repo/pull/43"
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config = resolved
+	sctx.Config.CITimeout = 10 * time.Minute
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	step := &CIStep{waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}}
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected invalid declaration to keep monitoring, got %v", err)
+	}
+	dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.CIReadyAt != nil || dbRun.CIReadyNoCI {
+		t.Fatalf("invalid or untrusted no_ci must not record readiness, got at=%v no_ci=%v", dbRun.CIReadyAt, dbRun.CIReadyNoCI)
 	}
 }
 

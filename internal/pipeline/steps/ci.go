@@ -505,7 +505,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// Without that declaration, keep waiting - delayed registration
 					// is common and must never look green. Elapsed time is not
 					// evidence; there is no grace-period promotion path.
-					if sctx.Config != nil && sctx.Config.NoCI {
+					if trustedNoCIReady(sctx.Config, checks) {
 						lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 					} else {
 						clearCIMonitorReady(sctx)
@@ -547,6 +547,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return nil, err
 		}
 	}
+}
+
+// trustedNoCIReady is intentionally narrow: Config.NoCI is populated only by
+// the trusted default-branch config, and it can establish readiness only when
+// the forge has registered no checks. Registered checks always go through the
+// ordinary readiness and failure paths, even on a no-CI repository.
+func trustedNoCIReady(cfg *config.Config, checks []scm.Check) bool {
+	return cfg != nil && cfg.NoCI && len(checks) == 0
 }
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {

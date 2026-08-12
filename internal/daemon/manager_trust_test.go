@@ -164,7 +164,7 @@ func TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(src, ".no-mistakes.yaml"),
-		[]byte("commands:\n  lint: \"echo stale-A\"\n"), 0o644); err != nil {
+		[]byte("commands:\n  lint: \"echo stale-A\"\nno_ci: false\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, src, "add", ".")
@@ -181,7 +181,7 @@ func TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch(t *testing.T) {
 
 	// Advance the default branch to a fresh command and push.
 	if err := os.WriteFile(filepath.Join(src, ".no-mistakes.yaml"),
-		[]byte("commands:\n  lint: \"echo fresh-B\"\n"), 0o644); err != nil {
+		[]byte("commands:\n  lint: \"echo fresh-B\"\nno_ci: true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, src, "add", ".")
@@ -210,5 +210,8 @@ func TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch(t *testing.T) {
 	}
 	if trusted.Commands.Lint != "echo fresh-B" {
 		t.Fatalf("trusted lint = %q, want fresh-B (read at pinned SHA, not stale ref)", trusted.Commands.Lint)
+	}
+	if !trusted.NoCI {
+		t.Fatal("trusted no_ci = false, want true from the freshly fetched default branch")
 	}
 }
