@@ -146,6 +146,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 **Local Eval (`internal/eval`)**
 
 - Global-only keys in `config.yaml` (not env); auto-capture after terminal outcome. Gold by recorded fix/skip + merge; `diversified` pinned gold-only. Shared object pools, not per-case bundles. Details: `docs/src/content/docs/reference/eval.md`.
+- Eval subcommands idempotent (`internal/eval/idempotency_test.go`); replay never rewrites case labels/manifests. Dashboards: `internal/cli/eval_render.go`.
 
 **Telemetry**
 
