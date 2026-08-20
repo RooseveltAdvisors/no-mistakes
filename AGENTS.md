@@ -115,6 +115,10 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - One fixer session per run; every review turn session-free (rereview never resumes prescriber session). Fail-safe: cold on unsupported adapter; failed resume retries fresh; `session_reuse: false` forces cold.
 - Codex resume narrower flags; fakeagent parses both argv shapes.
 
+**Recorded Human Decisions on Findings**
+
+- Approve/skip/abort on a gated round with findings record decline (`recordDeclinedRound`); never erase an existing selection. Decline = complement of selection (excludes `auto_fix`). `roundHistoryPromptSection` carries this step, other steps, and earlier runs' branch decisions (`BindBranchDecisions`); advisory, fail-open. Semantics: `docs/src/content/docs/reference/pipeline-steps.md`.
+
 **Uncertified Review (`internal/pipeline/uncertified.go`)**
 
 - Review fixer commit without completed rereview persists per-branch range; next initial review binds `fixRoundProvenanceClause`. Clear only on completed review at/after `to_sha`; rebase remaps SHAs.
@@ -144,6 +148,10 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
 
 **Local Eval (`internal/eval`)**
+
+**Recorded Human Decisions on Findings**
+
+- Approve/skip/abort on a gated round with findings record decline (`recordDeclinedRound`); never erase an existing selection. Decline = complement of selection (excludes `auto_fix`). `roundHistoryPromptSection` carries this step, other steps, and earlier runs' branch decisions (`BindBranchDecisions`); advisory, fail-open. Semantics: `docs/src/content/docs/reference/pipeline-steps.md`.
 
 - Global-only keys in `config.yaml` (not env); auto-capture after terminal outcome. Gold by recorded fix/skip + merge; `diversified` pinned gold-only. Shared object pools, not per-case bundles. Details: `docs/src/content/docs/reference/eval.md`.
 - Eval subcommands idempotent (`internal/eval/idempotency_test.go`); replay never rewrites case labels/manifests. Dashboards: `internal/cli/eval_render.go`.
