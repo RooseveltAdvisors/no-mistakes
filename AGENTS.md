@@ -39,6 +39,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Long-lived cancellable children: `shellenv.ConfigureShellCommand` (process group + `cmd.Cancel`). One-shots: `RunShellCommand`/`OutputShellCommand`/`CombinedOutputShellCommand`, or `StartShellCommand` + `TerminateShellCommandGroup` - `cmd.Cancel` alone does not reap on clean exit (#357 OOM). `WaitDelay` 5s backstop. Regressions: `TestCodexAgent_Run_ReapsLeakedGrandchildOnCleanExit`, `TestRunShellCommandWithEnv_*`, `TestTerminateShellCommandGroup_*`.
 - `internal/procreap`: cwd-under-worktree identity reaping; spares pending/running runs; startup + per-run sweeps. Windows: job objects. Regressions: `internal/procreap`, sweep tests.
 - Windows console children: `winproc.Harden(cmd)` (`shellenv` already calls it).
+- `procreap` reach: `<NM_HOME>/worktrees` by shape plus only run-recorded worktrees in configured roots; sweep before every worktree removal (`SweepRunWorktree`).
 
 **Recursive Gate-Execution Containment**
 
@@ -48,6 +49,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 **Filesystem and Paths**
 
 - `filepath.Join`; `NM_HOME` for state; `0o755` dirs / `0o644` files. macOS: resolve symlinks for comparisons.
+- Run worktree placement (`worktree_roots`): `internal/worktrees`; decided once at run creation, persisted in `runs.worktree_dir`; consumers read via `worktrees.RecordedDir`, never re-derive. `worktrees.CheckPlacement` single unusable-root policy; `init` refuses the same set. Compare paths via `worktrees.Canonical`/`Contains`.
 
 **Git on Bare Gate Repos (`safe.bareRepository`)**
 
@@ -67,6 +69,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - One daemon per `NM_HOME`: exclusive `daemon.lock` first in `RunWithOptions`, before recovery/socket; held for life.
 - Readiness = IPC health, not PID alone; stop waits for process exit (releases lock). Socket: dial-before-unlink; bounded dial (`daemon_connect_timeout`). `daemon run --root` explicit only.
 - Never remove worktrees with `pending`/`running` runs. User model: `docs/src/content/docs/concepts/daemon.md`.
+- Cleanup/eject in a configured worktree root act only on recorded run worktrees, never enumerate.
 
 **Bounded Logging and Event-Driven AXI**
 

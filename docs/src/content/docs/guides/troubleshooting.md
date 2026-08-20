@@ -69,6 +69,11 @@ no-mistakes daemon start
 
 If the socket file exists but nothing answers at all (a dead socket left behind by an unclean exit, e.g. a crash or `SIGKILL`), commands that ensure the daemon is running (`no-mistakes`, `init`, `attach`, `rerun`, `axi run`, `axi respond`) now fail fast with a `connect to daemon socket` error instead of silently starting a replacement daemon. The error message itself includes a `(run 'no-mistakes daemon start' to recover)` hint - run `no-mistakes daemon start` directly to recover, since it self-heals past a dead socket and starts a fresh daemon.
 
+### "configured worktree placement is unusable"
+
+The daemon refuses to start while any [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) entry names a directory it cannot create run worktrees in, and `~/.no-mistakes/logs/daemon.log` names the offending entry.
+Because every command starts the daemon, that takes the whole CLI down until the entry is fixed: point it at a directory outside `NM_HOME` and outside every gated checkout, or remove it, then run `no-mistakes daemon start`.
+
 ### Managed service logs
 
 - **macOS (launchd):** `launchctl list | grep no-mistakes` and check `~/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.*.plist`
@@ -268,7 +273,7 @@ Start a new run only after abort confirms the terminal state; see the [abort com
 
 ## Worktree won't clean up
 
-Symptom: `~/.no-mistakes/worktrees/<repoID>/<runID>/` sticks around after a run ends.
+Symptom: `~/.no-mistakes/worktrees/<repoID>/<runID>/` - or `<root>/<runID>` when the repository has a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) - sticks around after a run ends.
 
 The daemon removes worktrees at run completion, and also on daemon startup (crash recovery). If one is still there:
 
@@ -294,6 +299,8 @@ no-mistakes daemon stop --force
 rm -rf ~/.no-mistakes/worktrees ~/.no-mistakes/servers ~/.no-mistakes/socket ~/.no-mistakes/daemon.pid ~/.no-mistakes/daemon.lock
 no-mistakes daemon start
 ```
+
+If [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) places a repository's runs outside `NM_HOME`, delete the leftover `<root>/<run id>` directories there as well - only those; the root is your own directory and holds nothing else of no-mistakes'.
 
 This keeps your gate repos, database, and config but clears transient state. For a full wipe, see the [Uninstall section](/no-mistakes/start-here/installation/#uninstall).
 Wedged state often means a run is stuck `pending` or `running`, so `daemon stop` refuses without `--force`; only force through once you've confirmed it's fine for the listed runs to fail.
