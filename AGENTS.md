@@ -96,6 +96,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`. `allow_repo_commands` default false on trusted branch only.
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
+- `pr.base_branch` trusted-only but honors `allow_repo_commands` opt-in; existing PR forge base (`scm.PRBaseBranchReader`) wins for CI repair/tip monitoring; PR lookup by branch only. Semantics: `repo-config.md`.
 
 **CI Monitor Lifecycle**
 
@@ -148,10 +149,6 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
 
 **Local Eval (`internal/eval`)**
-
-**Recorded Human Decisions on Findings**
-
-- Approve/skip/abort on a gated round with findings record decline (`recordDeclinedRound`); never erase an existing selection. Decline = complement of selection (excludes `auto_fix`). `roundHistoryPromptSection` carries this step, other steps, and earlier runs' branch decisions (`BindBranchDecisions`); advisory, fail-open. Semantics: `docs/src/content/docs/reference/pipeline-steps.md`.
 
 - Global-only keys in `config.yaml` (not env); auto-capture after terminal outcome. Gold by recorded fix/skip + merge; `diversified` pinned gold-only. Shared object pools, not per-case bundles. Details: `docs/src/content/docs/reference/eval.md`.
 - Eval subcommands idempotent (`internal/eval/idempotency_test.go`); replay never rewrites case labels/manifests. Dashboards: `internal/cli/eval_render.go`.
