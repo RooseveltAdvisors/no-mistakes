@@ -12,7 +12,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - `no-mistakes init --fork-url <url>` expects `origin` at the parent and `<url>` at the fork; plain `init` preserves fork URL on idempotent refresh.
 - Push and CI auto-fix push must use `resolvePushURL` (`internal/pipeline/steps/common_git.go`). Non-fork paths recover the credentialled upstream from the worktree `origin` at run time because DB `upstream_url` is redacted. `Repo.PushURL()` is for fork-only callers (e.g. `rebase.go`).
 - GitHub PR: `--repo` parent; `--head <fork_owner>:<branch>` when `fork_url` set. Existing PR lookup: bare branch + filter head owner; never `gh pr list --head <owner>:<branch>`.
-- GitLab/Bitbucket fork MR routing is out of scope; legacy `fork_url` on those hosts must skip PR creation, not self-PR.
+- Non-GitHub fork MR/PR routing is out of scope; legacy `fork_url` on other providers must skip PR creation, not self-PR.
 - Each run best-effort refreshes upstream/fork via `gate.RefreshRepoURLs` (origin authority; fork needs one matching clone remote; atomic DB replace; failures log bounded reason and keep old registration; never rewrite clone/gate remotes). `Repo.URLsVerified` is run-scoped trust for refreshed DB URLs.
 
 **Credential Redaction in Stored URLs and Errors (security)**
