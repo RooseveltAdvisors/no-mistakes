@@ -109,6 +109,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Cancelled checks: rerun before CI fix; budget per name; no rerun after head != `runs.head_sha`. `ci_transient.go` owns classification/retirement.
 - Terminal cancel bucket != pending (#628). Live rollup head, not recorded SHA only.
 - Regressions: `TestCIStep_*`, `TestChecksPassed_PR607RealLogSequence`, `TestEffectiveRepoConfig_NoCITrustedOnly`.
+- GitHub readiness = PR head rollup ∪ Actions workflow runs for that SHA; discovery errors/unknown states fail closed.
 
 **Parked / Awaiting-Agent Signal**
 
