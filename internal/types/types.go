@@ -156,15 +156,16 @@ const (
 type AgentName string
 
 const (
-	AgentAuto     AgentName = "auto"
-	AgentClaude   AgentName = "claude"
-	AgentCodex    AgentName = "codex"
-	AgentGrok     AgentName = "grok"
-	AgentRovoDev  AgentName = "rovodev"
-	AgentOpenCode AgentName = "opencode"
-	AgentPi       AgentName = "pi"
-	AgentCopilot  AgentName = "copilot"
-	AgentCursor   AgentName = "cursor"
+	AgentAuto        AgentName = "auto"
+	AgentClaude      AgentName = "claude"
+	AgentCodex       AgentName = "codex"
+	AgentGrok        AgentName = "grok"
+	AgentRovoDev     AgentName = "rovodev"
+	AgentOpenCode    AgentName = "opencode"
+	AgentPi          AgentName = "pi"
+	AgentCopilot     AgentName = "copilot"
+	AgentCursor      AgentName = "cursor"
+	AgentAntigravity AgentName = "antigravity"
 )
 
 // ACPAlias describes a first-class agent name that resolves to an ACP target.
