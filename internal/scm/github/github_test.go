@@ -923,7 +923,7 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base main --state open --json number,url": {
+		"gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName": {
 			stderr: "api unavailable\n",
 			code:   1,
 		},
@@ -938,6 +938,103 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	}
 	if pr != nil {
 		t.Fatalf("FindPR() PR = %+v, want nil", pr)
+	}
+}
+
+func TestFindPRRejectsURLForDifferentRepository(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr list --head feature/refactor --base main --repo parent/repo --state open --json number,url,baseRefName": {
+			stdout: `[{"number":42,"url":"https://github.com/other/repo/pull/42","baseRefName":"main"}]` + "\n",
+		},
+	}), nil, "github.com", "parent/repo")
+
+	pr, err := host.FindPR(context.Background(), "feature/refactor", "main")
+	if err == nil {
+		t.Fatal("FindPR() error = nil, want repository mismatch error")
+	}
+	if !strings.Contains(err.Error(), "parse gh pr list") {
+		t.Fatalf("FindPR() error = %v, want parse context", err)
+	}
+	if pr != nil {
+		t.Fatalf("FindPR() PR = %+v, want nil", pr)
+	}
+}
+
+func TestFindPRReturnsJSONError(t *testing.T) {
+	t.Parallel()
+
+	const findPRListCommand = "gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName"
+	valid := `{"number":42,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"main"}`
+	for _, output := range []string{
+		"[{\n",
+		"null\n",
+		"[{}]\n",
+		"[" + valid + ",{}]\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/43","baseRefName":"main"}]` + "\n",
+		`[{"number":-1,"url":"https://github.example.com/org/repo/pull/-1","baseRefName":"main"}]` + "\n",
+		`[{"number":0,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"42","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/42?view=files","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/42#discussion","baseRefName":"main"}]` + "\n",
+		`[{"number":42,"url":"https://github.example.com/org/repo/pull/%34%32","baseRefName":"main"}]` + "\n",
+	} {
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{
+			findPRListCommand: {
+				stdout: output,
+			},
+		}), nil, "", "")
+
+		pr, err := host.FindPR(context.Background(), "feature/refactor", "main")
+		if err == nil {
+			t.Fatal("FindPR() error = nil, want JSON error")
+		}
+		if !strings.Contains(err.Error(), "parse gh pr list") {
+			t.Fatalf("FindPR() error = %v, want parse context", err)
+		}
+		if pr != nil {
+			t.Fatalf("FindPR() PR = %+v, want nil", pr)
+		}
+	}
+}
+
+func TestFindPRForkRejectsMissingHeadIdentity(t *testing.T) {
+	t.Parallel()
+
+	branch := "feature/refactor"
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name:   "missing head ref",
+			output: `[{"number":42,"url":"https://github.com/parent/repo/pull/42","headRepositoryOwner":{"login":"fork-owner"}}]`,
+		},
+		{
+			name:   "missing head owner",
+			output: `[{"number":42,"url":"https://github.com/parent/repo/pull/42","headRefName":"feature/refactor","headRepositoryOwner":null}]`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			host := NewWithFork(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
+					stdout: tc.output + "\n",
+				},
+			}), nil, "", "parent/repo", "fork-owner/repo")
+
+			pr, err := host.FindPR(context.Background(), branch, "main")
+			if err == nil {
+				t.Fatal("FindPR() error = nil, want head identity error")
+			}
+			if !strings.Contains(err.Error(), "parse gh pr list") {
+				t.Fatalf("FindPR() error = %v, want parse context", err)
+			}
+			if pr != nil {
+				t.Fatalf("FindPR() PR = %+v, want nil", pr)
+			}
+		})
 	}
 }
 

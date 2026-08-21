@@ -214,7 +214,11 @@ type Host interface {
 	// error explaining why it is not (missing CLI, unauthenticated, etc).
 	Available(ctx context.Context) error
 
-	// FindPR returns the open PR for the source branch, or nil if none exists.
+	// FindPR returns the open PR for the source branch, or nil only when a
+	// successfully decoded and validated PR listing contains no matching PR. It
+	// returns an error for lookup, response-decoding, or validation failures
+	// (including empty, malformed, null, or incoherent payloads) so callers do
+	// not create a duplicate PR after an indeterminate lookup.
 	FindPR(ctx context.Context, branch, base string) (*PR, error)
 	CreatePR(ctx context.Context, branch, base string, content PRContent) (*PR, error)
 	UpdatePR(ctx context.Context, pr *PR, content PRContent) (*PR, error)

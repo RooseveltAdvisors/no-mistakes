@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -156,6 +157,46 @@ func (h *Host) Available(ctx context.Context) error {
 	return nil
 }
 
+func parsePullRequestURL(raw, expectedHost, expectedRepo string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return 0, errors.New("expected absolute GitHub pull request URL")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return 0, errors.New("expected HTTP GitHub pull request URL")
+	}
+	if expectedHost != "" && !strings.EqualFold(parsed.Hostname(), expectedHost) {
+		return 0, fmt.Errorf("URL host %q does not match GitHub host %q", parsed.Hostname(), expectedHost)
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(segments) != 4 || segments[2] != "pull" {
+		return 0, errors.New("expected GitHub /owner/repo/pull/number URL")
+	}
+	for _, segment := range segments[:2] {
+		if segment == "" || segment == "." || segment == ".." {
+			return 0, errors.New("expected unambiguous GitHub owner/repository path")
+		}
+	}
+	actualRepo := segments[0] + "/" + segments[1]
+	expectedRepo = strings.Trim(strings.TrimSpace(expectedRepo), "/")
+	if expectedRepo != "" && !strings.EqualFold(actualRepo, expectedRepo) {
+		return 0, fmt.Errorf("URL repository %q does not match GitHub repository %q", actualRepo, expectedRepo)
+	}
+	number, err := strconv.Atoi(segments[3])
+	if err != nil || number <= 0 {
+		return 0, errors.New("expected positive GitHub pull request number")
+	}
+	escapedSegments := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(escapedSegments) != len(segments) || escapedSegments[len(escapedSegments)-1] != strconv.Itoa(number) {
+		return 0, errors.New("expected canonical GitHub pull request number path")
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(trimmed, "#") {
+		return 0, errors.New("expected GitHub pull request URL without query or fragment")
+	}
+	return number, nil
+}
+
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
 	args := []string{"pr", "list", "--head", branch}
 	if strings.TrimSpace(base) != "" {
@@ -181,21 +222,49 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 			Login string `json:"login"`
 		} `json:"headRepositoryOwner"`
 	}
-	if err := json.Unmarshal(out, &prs); err != nil || len(prs) == 0 {
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, fmt.Errorf("parse gh pr list JSON: %w", err)
+	}
+	if prs == nil {
+		return nil, errors.New("parse gh pr list JSON: expected array")
+	}
+	if len(prs) == 0 {
 		return nil, nil
 	}
-	for _, candidate := range prs {
+	prNumbers := make([]string, len(prs))
+	for i, candidate := range prs {
+		if candidate.Number <= 0 {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing positive PR number", i)
+		}
+		url := strings.TrimSpace(candidate.URL)
+		if url == "" {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing PR URL", i)
+		}
+		number, err := parsePullRequestURL(url, h.host, h.repoSlug())
+		if err != nil {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d invalid PR URL: %w", i, err)
+		}
+		if candidate.Number != number {
+			return nil, fmt.Errorf("parse gh pr list JSON: entry %d PR number %d does not match URL number %d", i, candidate.Number, number)
+		}
+		prNumbers[i] = strconv.Itoa(candidate.Number)
+		if h.forkOwner != "" {
+			if strings.TrimSpace(candidate.HeadRefName) == "" {
+				return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing headRefName", i)
+			}
+			if candidate.HeadRepositoryOwner == nil || strings.TrimSpace(candidate.HeadRepositoryOwner.Login) == "" {
+				return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing headRepositoryOwner login", i)
+			}
+		}
+	}
+	for i, candidate := range prs {
 		if !h.matchesHead(candidate.HeadRefName, candidate.HeadRepositoryOwner, branch) {
 			continue
 		}
-		pr := &scm.PR{URL: strings.TrimSpace(candidate.URL), BaseBranch: strings.TrimSpace(candidate.BaseRefName)}
-		if candidate.Number > 0 {
-			pr.Number = fmt.Sprintf("%d", candidate.Number)
-		} else if num, nerr := scm.ExtractPRNumber(pr.URL); nerr == nil {
-			pr.Number = num
-		}
-		if pr.URL == "" {
-			return nil, nil
+		pr := &scm.PR{
+			Number:     prNumbers[i],
+			URL:        strings.TrimSpace(candidate.URL),
+			BaseBranch: strings.TrimSpace(candidate.BaseRefName),
 		}
 		return pr, nil
 	}
