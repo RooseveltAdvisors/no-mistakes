@@ -20,6 +20,8 @@ Commits created by the shared Review, Test, Document, and Lint fix path use the 
 Before any fix-round commit is created, and before a stopped fix-round rebase is continued, its message is rewritten through the firstmate fleet AI-co-author trailer strip (`fm-git-strip-ai-trailers.sh`), so a fix-round commit is never born carrying a `Co-authored-by` trailer; the gate's managed `commit-msg` hook applies the same strip to commits the fix agent makes itself.
 A fix-round rebase re-commits every replayed pick through that hook, cannot be continued past a failed strip, and is refused unless every rebased commit message passes the strip unchanged.
 The strip resolves from [`NO_MISTAKES_AI_TRAILER_STRIP`](/no-mistakes/reference/environment/#no_mistakes_ai_trailer_strip), then from the run worktree's `bin/`; when neither holds it, the commit is refused.
+These correction commits, and the Push step's commit of leftover changes from a pipeline agent or formatter, are machine-authored records of pipeline output. Each is created with the complete local commit-hook family suppressed by combining `--no-verify` with an empty temporary `core.hooksPath` for that invocation, so `pre-commit`, `prepare-commit-msg`, `commit-msg`, and `post-commit` do not run. This lets a disposable run worktree commit a correction even when a tracked hook depends on generated untracked runtime files that do not exist there - the canonical case is `core.hooksPath=.husky` with a tracked hook that sources the absent `.husky/_/husky.sh`.
+The suppression is limited to those correction-commit invocations. It does not change the repository, Git configuration, or daemon environment; CI repair commits and all other commit paths keep normal hook behavior. The Review, Test, Document, Lint, Push, PR, and CI gates remain the authoritative checks on what these commits contain.
 Agent roles that can write, repair, or review tests reject tests whose only evidence is matching implementation source text, tokens, syntax, or incidental snapshots.
 They instead require an executable interface or a typed or normalized semantic model that proves observable behavior.
 Reading a file remains valid when that file is itself an owned output or data contract, and deterministic tests may inspect the final emitted agent prompt as a generated interface; model interpretation is reserved for development-only evaluation.
@@ -183,7 +185,7 @@ Pushes the validated branch to the configured push target.
 **Behavior:**
 
 - If `commands.format` is set, runs it first
-- Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`
+- Commits any uncommitted changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
