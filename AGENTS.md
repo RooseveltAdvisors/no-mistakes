@@ -144,6 +144,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - Targeted validation only; broad regression is CI (`go test -race ./...` in `.github/workflows/ci.yml`). Empty `commands.test` here by design; do not add full suite locally.
 - Test agent turns bounded by `test_agent_timeout` (default 30m, global-only); stall fails the run.
+- All other agent invocations bounded by `agent_timeout` (default 30m, global-only) at `pipeline.RunAgent`/executor `timeoutAgent`; sooner deadlines honored; late success rejected.
 
 **Intent Provenance (`internal/pipeline/steps/intent_prompt.go`)**
 
