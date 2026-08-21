@@ -163,7 +163,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
-	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
+	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +233,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+		return nil, err
+	}
 	cfg.TrustedConfigSHA = trustedSHA
 	if globalCfg.Eval.CaptureProvenance {
 		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
@@ -242,7 +245,7 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	return cfg, nil
 }
 
-func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (agent.Agent, error) {
+func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error)) (agent.Agent, error) {
 	if steps.IsDemoMode() {
 		return agent.NewNoop(), nil
 	}
@@ -265,7 +268,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 			}
 			return nil, fmt.Errorf("create agent %s: %w", name, err)
 		}
-		created = append(created, agent.WithSteering(next))
+		created = append(created, agent.WithSteering(next, evidenceRoot))
 	}
 	ag := agent.NewFallback(created)
 	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an
@@ -313,6 +316,13 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetOnPRMerged(func(_ context.Context, runID string) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.relabelEvalRun(context.Background(), plan.cfg, runID)
+		}()
+	})
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -340,6 +350,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
 			}
+			// A recovered run is a finished run too. This is the second of the
+			// two completion boundaries, and leaving it out is what let a run
+			// resumed after a daemon restart keep its empty evidence directory
+			// until some later run or restart happened to sweep it.
+			m.cleanupRunEvidence(plan.cfg, plan.run.ID)
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -488,6 +503,40 @@ func (m *RunManager) sweepRunWorktreeProcesses(wtDir string) {
 		WorktreesRoot: m.paths.WorktreesDir(),
 		Scope:         wtDir,
 	}, "run_cleanup")
+}
+
+// cleanupRunEvidence tidies up after one finished run, then bounds the whole
+// evidence directory.
+//
+// The per-run half is deliberately os.Remove and not os.RemoveAll: it succeeds
+// only when the directory is empty, so a run that produced no artifact leaves
+// nothing behind while a run that did keeps every file. The test step creates
+// the directory before the agent decides whether it has evidence to write, so
+// without this nearly every run left a permanent empty directory - that alone
+// was the overwhelming majority of the accumulation this reaper exists to stop.
+//
+// The sweep that follows keeps a long-lived daemon converging on the retention
+// budget instead of waiting for a restart. Both halves are best effort: losing
+// a cleanup pass costs disk, while failing a finished run over it would cost
+// the user their result.
+func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
+	configured := ""
+	policy := evidenceReapPolicy{
+		Retention: config.DefaultEvidenceRetention,
+		MaxRuns:   config.DefaultEvidenceMaxRuns,
+	}
+	if cfg != nil {
+		configured = cfg.Test.Evidence.LocalRoot
+		policy = evidenceReapPolicy{
+			Retention: cfg.Test.Evidence.Retention,
+			MaxRuns:   cfg.Test.Evidence.MaxRuns,
+		}
+	}
+	root := m.paths.EvidenceRoot(configured)
+	if err := os.Remove(filepath.Join(root, runID)); err != nil && !os.IsNotExist(err) {
+		slog.Debug("run evidence kept", "run_id", runID, "reason", err)
+	}
+	reapEvidence(m.db, root, policy, time.Now())
 }
 
 // closeSubscribers soft-closes every subscriber for a run and marks the run
@@ -876,6 +925,11 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("evidence_root")
+		return "", err
+	}
 	cfg.TrustedConfigSHA = trustedSHA
 	if globalCfg.Eval.CaptureProvenance {
 		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
@@ -913,7 +967,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			// Steer every pipeline agent to keep writes inside the worktree and
 			// avoid mutating system state (e.g. brew/Homebrew touching
 			// /Applications), which triggers macOS App Management prompts.
-			created = append(created, agent.WithSteering(next))
+			created = append(created, agent.WithSteering(next, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot)))
 		}
 		ag = agent.NewFallback(created)
 		// Fail closed ONLY under the trusted opt-out: when the repo asked to
@@ -944,6 +998,13 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetSkippedSteps(skipSteps)
+	executor.SetOnPRMerged(func(_ context.Context, runID string) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.relabelEvalRun(context.Background(), cfg, runID)
+		}()
+	})
 
 	// Track executor.
 	done := make(chan struct{})
@@ -996,6 +1057,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
 				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
 			}
+			m.cleanupRunEvidence(cfg, run.ID)
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)
@@ -1099,6 +1161,41 @@ func (m *RunManager) autoCaptureEvalCase(ctx context.Context, cfg *config.Config
 		slog.Debug("run has no eval case to collect", "run_id", runID, "reason", result.Reason)
 	default:
 		slog.Info("collected eval case", "run_id", runID, "cases", result.Captured, "pruned", result.Pruned)
+	}
+}
+
+func (m *RunManager) relabelEvalRun(ctx context.Context, cfg *config.Config, runID string) {
+	// Best-effort and off the CI step's call stack: a merge must not stall
+	// the pipeline for eval I/O. The caller holds m.wg for daemon drain.
+	if m == nil || m.paths == nil || m.db == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic while relabeling eval case", "run_id", runID, "panic", r)
+		}
+	}()
+	m.evalCaptureMu.Lock()
+	defer m.evalCaptureMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, evalAutoCaptureTimeout)
+	defer cancel()
+	store, err := eval.Open(m.paths.EvalDir())
+	if err != nil {
+		slog.Warn("failed to open eval store for relabel", "run_id", runID, "error", err)
+		return
+	}
+	defer store.Close()
+	if cfg != nil {
+		store.SetDiversifiedSize(cfg.Eval.DiversifiedSize)
+	}
+	if _, err := eval.RelabelRun(ctx, store, m.paths, m.db, runID); err != nil {
+		slog.Warn("failed to relabel eval case after merge", "run_id", runID, "error", err)
 	}
 }
 
