@@ -14,6 +14,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/eval"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -695,9 +696,11 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
 }
 
-// HandleRerun creates a new run for the latest gate head on a branch. An
-// explicit intent overrides the selected run. Otherwise an authoritative
-// intent is inherited byte-for-byte; runs without one infer intent afresh.
+// HandleRerun creates a new run for the latest recoverable head on a branch:
+// normally the gate branch, or the latest terminal run's verified unpublished
+// head while custody remains outstanding. An explicit intent overrides the
+// selected run. Otherwise an authoritative intent is inherited byte-for-byte;
+// runs without one infer intent afresh.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
@@ -708,7 +711,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	}
 
 	gateDir := m.paths.RepoDir(repo.ID)
-	headSHA, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
 	}
@@ -727,13 +730,17 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		if latestForBranch == nil {
 			latestForBranch = run
 		}
-		if run.HeadSHA == headSHA {
+		if run.HeadSHA == gateHead {
 			matchingHead = run
 			break
 		}
 	}
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
+	}
+	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
+	if err != nil {
+		return "", err
 	}
 	selectedRun := latestForBranch
 	if previousRunID != "" {
@@ -747,7 +754,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	}
 
 	baseSHA := latestForBranch.BaseSHA
-	if matchingHead != nil {
+	if matchingHead != nil && headSHA == gateHead {
 		baseSHA = matchingHead.BaseSHA
 	}
 
@@ -765,6 +772,47 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	}
 
 	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource)
+}
+
+func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
+	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve gate head: %w", err)
+	}
+	if latest == nil || !latest.Status.Terminal() || latest.CustodyReturnedAt != nil || latest.HeadSHA == gateHead {
+		return gateHead, nil
+	}
+	published := ""
+	if latest.LastPushedSHA != nil {
+		published = *latest.LastPushedSHA
+	} else if latest.SubmittedHeadSHA != nil {
+		published = *latest.SubmittedHeadSHA
+	}
+	if published == latest.HeadSHA || latest.TerminalHeadVerifiedAt == nil {
+		return gateHead, nil
+	}
+	recoveryRef := custody.RecoveryRef(latest.ID)
+	refTarget, refExists, refErr := git.ExactRefTarget(ctx, gateDir, recoveryRef)
+	if refErr != nil {
+		return "", fmt.Errorf("inspect terminal recovery ref for run %s: %w", latest.ID, refErr)
+	}
+	if refExists {
+		preserved, preserveErr := git.Run(ctx, gateDir, "rev-parse", recoveryRef+"^{commit}")
+		if preserveErr != nil {
+			return "", fmt.Errorf("refusing rerun: terminal recovery ref for run %s points at non-commit object %s; inspect with `no-mistakes axi status` and reconcile custody first", latest.ID, refTarget)
+		}
+		if preserved != latest.HeadSHA {
+			return "", fmt.Errorf("refusing rerun: terminal recovery ref for run %s points at %s, not recorded unpublished head %s; inspect with `no-mistakes axi status` and reconcile custody first", latest.ID, preserved, latest.HeadSHA)
+		}
+		return preserved, nil
+	}
+	if preserved, objectErr := git.Run(ctx, gateDir, "rev-parse", latest.HeadSHA+"^{commit}"); objectErr == nil && preserved == latest.HeadSHA {
+		if anchorErr := custody.PreserveRecoveryHead(ctx, gateDir, latest.ID, preserved); anchorErr != nil {
+			return "", fmt.Errorf("preserve terminal head %s before rerun: %w", preserved, anchorErr)
+		}
+		return preserved, nil
+	}
+	return "", fmt.Errorf("refusing rerun from stale gate head %s: terminal run %s recorded unpublished head %s, but that head is unavailable; inspect with `no-mistakes axi status` and reconcile custody first", gateHead, latest.ID, latest.HeadSHA)
 }
 
 // fetchRunDefaultBranch fetches the trusted branch from the refreshed
@@ -1082,7 +1130,14 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 				}
 				addRunPerformanceSummary(m.db, run.ID, fields)
 				telemetry.Track("run", fields)
-				if dbErr := m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed); dbErr != nil {
+				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
+				var dbErr error
+				if verified {
+					dbErr = m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, types.RunFailed, verifiedHead)
+				} else {
+					dbErr = m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed)
+				}
+				if dbErr != nil {
 					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
 				}
 			}
