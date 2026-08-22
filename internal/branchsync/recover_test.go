@@ -341,6 +341,10 @@ func TestRecoverWorktreeAlreadyAtPreservedHeadReturnsCustodyWithoutMutation(t *t
 	if err := os.RemoveAll(f.gate); err != nil {
 		t.Fatal(err)
 	}
+	inspected := f.service.InspectCached(f.ctx)
+	if inspected.NextAction == nil || inspected.NextAction.Code != "recover_custody" {
+		t.Fatalf("equal status without gate did not advertise recovery = %#v", inspected)
+	}
 	state := f.service.Recover(f.ctx, false)
 	if !state.Recovered || state.Changed || state.State != StateCustodyReturned || state.Relation != RelationEqual {
 		t.Fatalf("recover equal = %#v", state)
@@ -368,6 +372,10 @@ func TestRecoverLocalAheadOfPreservedHeadReturnsCustodyWithoutMutation(t *testin
 	if err := os.RemoveAll(f.gate); err != nil {
 		t.Fatal(err)
 	}
+	inspected := f.service.InspectCached(f.ctx)
+	if inspected.NextAction == nil || inspected.NextAction.Code != "recover_custody" {
+		t.Fatalf("ahead status without gate did not advertise recovery = %#v", inspected)
+	}
 	state := f.service.Recover(f.ctx, false)
 	if !state.Recovered || state.Changed || state.State != StateCustodyReturned || state.Relation != RelationAhead {
 		t.Fatalf("recover ahead = %#v", state)
@@ -386,6 +394,7 @@ func TestRecoverDirtyWorktreeRefusesWithoutMutation(t *testing.T) {
 	t.Parallel()
 
 	f := newRecoverFixture(t, types.RunCancelled)
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
 	mustWrite(t, filepath.Join(f.local, "file.txt"), "dirty\n")
 	inspected := f.service.InspectCached(f.ctx)
 	if inspected.NextAction == nil || inspected.NextAction.Code == "recover_custody" {
@@ -414,6 +423,7 @@ func TestRecoverDivergedRefusesButKeepLocalReturnsCustody(t *testing.T) {
 	t.Parallel()
 
 	f := newRecoverFixture(t, types.RunCancelled)
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
 	mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
 	mustRun(t, f.local, "add", "rescope.txt")
 	mustRun(t, f.local, "commit", "-m", "diverging rescope")
@@ -536,7 +546,7 @@ func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 	})
 }
 
-func TestRecoverReachableHeadIgnoresConflictingGateAnchor(t *testing.T) {
+func TestRecoverReachableHeadRejectsConflictingGateAnchor(t *testing.T) {
 	t.Parallel()
 
 	f := newRecoverFixture(t, types.RunCancelled)
@@ -545,12 +555,12 @@ func TestRecoverReachableHeadIgnoresConflictingGateAnchor(t *testing.T) {
 	mustRun(t, f.local, "reset", "--hard", f.preserved)
 
 	inspected := f.service.InspectCached(f.ctx)
-	if inspected.NextAction == nil || inspected.NextAction.Code != "recover_custody" {
-		t.Fatalf("inspect with locally reachable head = %#v", inspected)
+	if inspected.NextAction == nil || inspected.NextAction.Code == "recover_custody" {
+		t.Fatalf("inspect advertised recovery despite conflicting gate evidence = %#v", inspected)
 	}
 
 	state := f.service.Recover(f.ctx, false)
-	if !state.Recovered || state.Changed || state.State != StateCustodyReturned {
+	if state.Recovered || state.Changed || state.Safety != "blocked_recover_anchor_mismatch" {
 		t.Fatalf("recover with conflicting anchor = %#v", state)
 	}
 	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
@@ -559,8 +569,8 @@ func TestRecoverReachableHeadIgnoresConflictingGateAnchor(t *testing.T) {
 	if got := mustRun(t, f.gate, "rev-parse", f.anchorRef()); got != f.submitted {
 		t.Fatalf("gate recovery anchor = %s, want preserved conflict %s", got, f.submitted)
 	}
-	if !f.custodyReturned() {
-		t.Fatal("locally proven recovery did not stamp custody")
+	if f.custodyReturned() {
+		t.Fatal("conflicting recovery evidence stamped custody")
 	}
 }
 
@@ -580,6 +590,27 @@ func TestRecoverRejectsUnpeelableGateAnchorWithoutOverwritingIt(t *testing.T) {
 	}
 	if f.custodyReturned() {
 		t.Fatal("unpeelable recovery evidence stamped custody")
+	}
+}
+
+func TestRecoverRejectsSymbolicGateAnchorWithoutOverwritingIt(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	mustRun(t, f.gate, "symbolic-ref", f.anchorRef(), "refs/heads/feature/recover")
+	mustRun(t, f.local, "fetch", f.gate, f.preserved)
+	mustRun(t, f.local, "reset", "--hard", f.preserved)
+
+	inspected := f.service.InspectCached(f.ctx)
+	if inspected.NextAction == nil || inspected.NextAction.Code == "recover_custody" {
+		t.Fatalf("inspect advertised recovery despite symbolic gate evidence = %#v", inspected)
+	}
+	state := f.service.Recover(f.ctx, false)
+	if state.Recovered || state.Safety != "blocked_recover_anchor_mismatch" {
+		t.Fatalf("recover with symbolic anchor = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "symbolic-ref", f.anchorRef()); got != "refs/heads/feature/recover" {
+		t.Fatalf("symbolic recovery anchor = %s, want refs/heads/feature/recover", got)
 	}
 }
 
