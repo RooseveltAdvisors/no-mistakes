@@ -175,6 +175,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - `sync`/`axi sync`/TUI `u`: guarded FF or equivalent-diverged reset; `--recover` and `--keep-local` rules in `Recover` doc comment in `sync.go`. Push bindings persist SHA/fingerprint/generation. Cancellation unmoved head -> `user_owned`, not recoverable custody.
 - Each network remote op gets its own child deadline (`Service.RemoteTimeout`, global-only `branch_sync_remote_timeout`, default 60s).
+- Terminal moved-head runs pin unpublished head at `refs/no-mistakes/recover/<run>`; recovery reads that ref, not gate branch. Missing/conflicting evidence or dirty/divergent import fails closed to manual reconciliation.
 
 **Post-Review Head Continuity and Push**
 
