@@ -44,7 +44,7 @@ That directory is always outside the worktree and is reaped by no-mistakes on a 
 | Claude | `claude` | Subprocess per invocation, JSONL streaming |
 | Codex | `codex` | Subprocess per invocation, JSONL events |
 | Grok Build | `grok` | Subprocess per invocation, Messages-compatible JSONL streaming |
-| Antigravity | `agy` | Subprocess per invocation, NDJSON streaming |
+| Antigravity | `agy` | Subprocess per invocation, NDJSON `stream-json` events |
 | Rovo Dev | `acli` | Persistent HTTP server, SSE streaming |
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
@@ -275,7 +275,7 @@ Grok is not available to a repository with `disable_project_settings: true`, bec
 
 ## Antigravity
 
-Spawns an `agy` subprocess for each invocation with `--print <prompt> --output-format stream-json`, plus `--dangerously-skip-permissions` (always present; `agent_args_override` cannot suppress it). Reads NDJSON events from stdout, streaming `step_update` text deltas to the TUI. Structured output is requested with `--json-schema` and read from the terminal result's `structured_output`; stream deltas outrank the terminal `result.response`, and structured output outranks both.
+Spawns an `agy` subprocess for each invocation with `--print <prompt> --output-format stream-json`, plus `--dangerously-skip-permissions` (always present; `agent_args_override` cannot suppress it). Reads NDJSON events from stdout, streaming `step_update` text deltas to the TUI. Structured output is requested with a temporary `--json-schema` file and read from the terminal result's `structured_output`. Result precedence is terminal-authoritative: `structured_output` outranks the terminal result's `response`, which outranks the streamed deltas.
 For review-fixer reuse, Antigravity resumes the reported conversation with `--conversation <id>`. A pruned or unknown conversation id starts a fresh conversation instead of failing the turn.
 Usage accounting includes agy's reported `thinking_tokens` as reasoning tokens.
 `--conversation`, `-c`/`--continue`, the print/output flags, and the permission flag are reserved so global overrides cannot redirect the managed invocation.
@@ -342,6 +342,7 @@ $ no-mistakes doctor
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
+  – antigravity (not found)
   – acpx (not found)
   – cursor (not found (cursor-agent, acpx))
   ✓ gate validation claude is runnable
