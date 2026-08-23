@@ -10,14 +10,14 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - `repos.upstream_url` is the PR base parent; `repos.fork_url` is optional GitHub fork push target.
 - `no-mistakes init --fork-url <url>` expects `origin` at the parent and `<url>` at the fork; plain `init` preserves fork URL on idempotent refresh.
-- Push and CI auto-fix push must use `resolvePushURL` (`internal/pipeline/steps/common_git.go`). Non-fork paths recover the credentialled upstream from the worktree `origin` at run time because DB `upstream_url` is redacted. `Repo.PushURL()` is for fork-only callers (e.g. `rebase.go`).
+- Push (including after a CI repair restarts validation) must use `resolvePushURL` (`internal/pipeline/steps/common_git.go`). Non-fork paths recover the credentialled upstream from the worktree `origin` at run time because DB `upstream_url` is redacted. `Repo.PushURL()` is for fork-only callers (e.g. `rebase.go`).
 - GitHub PR: `--repo` parent; `--head <fork_owner>:<branch>` when `fork_url` set. Existing PR lookup: bare branch + filter head owner; never `gh pr list --head <owner>:<branch>`.
 - Non-GitHub fork MR/PR routing is out of scope; legacy `fork_url` on other providers must skip PR creation, not self-PR.
 - Each run best-effort refreshes upstream/fork via `gate.RefreshRepoURLs` (origin authority; fork needs one matching clone remote; atomic DB replace; failures log bounded reason and keep old registration; never rewrite clone/gate remotes). `Repo.URLsVerified` is run-scoped trust for refreshed DB URLs.
 
 **Credential Redaction in Stored URLs and Errors (security)**
 
-- `gate.InitWithFork` redacts upstream via `safeurl.Redact` before every DB persist and gate-init log; bare gate `origin` stays credentialled via `provisionGate`. Push/CI must recover credentials from worktree `origin` (`resolvePushURL`/`resolveUpstreamURL`), never `Repo.UpstreamURL`/`Repo.PushURL()`.
+- `gate.InitWithFork` redacts upstream via `safeurl.Redact` before every DB persist and gate-init log; bare gate `origin` stays credentialled via `provisionGate`. Push/branch-sync must recover credentials from worktree `origin` (`resolvePushURL`/`resolveUpstreamURL`), never `Repo.UpstreamURL`/`Repo.PushURL()`.
 - Step failures and Bitbucket resolve-repo errors use `safeurl.RedactText`/`safeurl.Redact`. New redaction sites: `internal/safeurl` only.
 - Regressions: `TestInitRedactsCredentialURL`, `TestResolveUpstreamURL_*`, `TestResolvePushURL_ForkWinsOverCredential`.
 
@@ -209,6 +209,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Prefer refuse over clever recovery. Rebase bases from fresh remote refs; unpushed local default commits park (#283).
 - `resolveForcePushDecision`: live remote read; allow only safe anchors; fetch failure fails closed.
 - `lastSeenSHA` is last observed head, not live tip before push (#281); rebase refreshes `origin/<branch>` on normal push only, not force push.
+- CI repairs commit locally and restart validation at Review; later Push owns remote update and force-push safety.
 
 **macOS Release Signing**
 
