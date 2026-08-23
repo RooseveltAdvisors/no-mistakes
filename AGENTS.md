@@ -21,6 +21,13 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Step failures and Bitbucket resolve-repo errors use `safeurl.RedactText`/`safeurl.Redact`. New redaction sites: `internal/safeurl` only.
 - Regressions: `TestInitRedactsCredentialURL`, `TestResolveUpstreamURL_*`, `TestResolvePushURL_ForkWinsOverCredential`.
 
+**Home-Path Redaction in Published PR Content (security)**
+
+- `internal/safepath` sole owner of home-dir redaction (`RedactText` -> `~`); no `filepath.IsAbs`/`VolumeName` in candidate resolution (Windows POSIX `HOME`).
+- `PRStep.buildPRContent` single render boundary (`redactPRContent`), after length caps. Not covered: agent commit subjects, evidence branch.
+- PR body has exactly ONE live attestation marker; neutralize foreign markers at assembly choke point (`appendGeneratedSectionsToCleanBodyWithinLimit`), never per render path.
+- Regressions: `internal/safepath/redact_test.go`, `pr_homepath_test.go`, `TestPRStep_ForeignAttestationsInEveryComponentDoNotShadowTheRealOne`.
+
 **Gitea Backend (`internal/scm/gitea`)**
 
 - Verified empirically against a real `tea 0.15.1` CLI and a real Gitea 1.27.2 + Actions instance (Docker/Podman `gitea/gitea` + `gitea/act_runner`), not guessed from docs. `tea whoami` has no `--login` flag (unlike every other tea entity subcommand), so `Host.Available` scopes its check through `tea api --login <name> /user` instead - the same host-scoping purpose as glab's `--hostname`.
