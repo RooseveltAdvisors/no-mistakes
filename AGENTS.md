@@ -15,6 +15,12 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - Non-GitHub fork MR/PR routing is out of scope; legacy `fork_url` on other providers must skip PR creation, not self-PR.
 - Each run best-effort refreshes upstream/fork via `gate.RefreshRepoURLs` (origin authority; fork needs one matching clone remote; atomic DB replace; failures log bounded reason and keep old registration; never rewrite clone/gate remotes). `Repo.URLsVerified` is run-scoped trust for refreshed DB URLs.
 
+**Repository Forge Identity (`internal/forgecontext`)**
+
+- Optional global `forge_profiles` map raw remote host tokens/SSH aliases to one isolated `gh` or `glab` config directory, plus an optional `expected_login` pin. The resolver owns profile selection, validation, parent/fork ambiguity, provider-specific fail-closed activation, and the immutable run environment; do not add ambient account switching or per-step routing. Profile identity for the parent/fork same-profile check is the config directory AND the pin, so conflicting pins fail as ambiguous instead of silently picking one account (`sameProfile`/`expectLogin` own the rationale).
+- A resolved context must reach built-in provider commands, configured shell commands, native agents, managed agent servers, and recovered approval reconciliation. Never mutate the daemon environment or persist credentials/profile selection in the DB; recovery re-resolves from current global config.
+- No configured profiles means exact legacy ambient behavior. Online auth failures keep provider steps' existing skip behavior; deterministic config/routing errors fail before the pipeline. The public contract lives in `docs/src/content/docs/reference/global-config.md`.
+
 **Credential Redaction in Stored URLs and Errors (security)**
 
 - `gate.InitWithFork` redacts upstream via `safeurl.Redact` before every DB persist and gate-init log; bare gate `origin` stays credentialled via `provisionGate`. Push/branch-sync must recover credentials from worktree `origin` (`resolvePushURL`/`resolveUpstreamURL`), never `Repo.UpstreamURL`/`Repo.PushURL()`.
