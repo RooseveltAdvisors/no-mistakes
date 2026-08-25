@@ -239,7 +239,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 **GitLab Backend (`internal/scm/gitlab`)**
 
-- `glab v1.5x` drift traps in `gitlab.go` comments (host-scoped auth, no `--state opened`, jobs via API).
+- `glab v1.5x` drift traps in `gitlab.go` comments (host-scoped auth, no `--state opened`, no `--yes` on `mr update`, jobs via API).
 
 **When Making Changes**
 
