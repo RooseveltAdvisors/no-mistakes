@@ -230,7 +230,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - Prefer refuse over clever recovery. Rebase bases from fresh remote refs; unpushed local default commits park (#283).
 - `resolveForcePushDecision`: live remote read; allow only safe anchors; fetch failure fails closed.
-- `lastSeenSHA` is last observed head, not live tip before push (#281); rebase refreshes `origin/<branch>` on normal push only, not force push.
+- `lastSeenSHA` is last observed head (run/prior-run push provenance or remote-tracking ref; #837), not live tip before push (#281); rebase refreshes `origin/<branch>` on normal push only, not force push.
 - CI repairs commit locally and restart validation at Review; later Push owns remote update and force-push safety.
 
 **macOS Release Signing**
