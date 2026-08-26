@@ -169,6 +169,10 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - `runs.awaiting_agent_since` set only at approval/fix_review gates; observability only.
 
+**AXI Run Resolution Is Branch-Scoped (`resolveRun`, `internal/cli/axi_query.go`)**
+
+- `axi status`/`axi logs` implicit run: current branch's active, else most recent, else none; no repo-wide fallback; detached HEAD resolves nothing. Cross-branch: `--run <id>` renders `other_branch_run:` + `current_branch:`; explicit `--run` is observation-only. Regressions: `axi_status_branch_test.go`.
+
 **Review-Loop Sessions (`internal/pipeline/sessions.go`)**
 
 - One fixer session per run; every review turn session-free (rereview never resumes prescriber session). Fail-safe: cold on unsupported adapter; failed resume retries fresh; `session_reuse: false` forces cold.
