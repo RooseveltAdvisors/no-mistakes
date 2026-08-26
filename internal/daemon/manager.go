@@ -688,7 +688,10 @@ func assertGateTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, 
 }
 
 // HandlePushReceived processes a push notification from the post-receive hook.
-// It creates a run, sets up a worktree, and launches pipeline execution in the background.
+// After parsing the repo ID from the gate path, it requires that path to equal
+// this daemon's RepoDir for the same ID so a cross-home notify cannot start a
+// run against the wrong mirror. It then creates a run, sets up a worktree, and
+// launches pipeline execution in the background.
 func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
 	// Ref deletion (git push remote :branch) sends new SHA as all-zeros.
 	// Nothing to validate - skip pipeline.

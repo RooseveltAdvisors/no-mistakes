@@ -139,6 +139,9 @@ func TestPushReceivedRejectsGateFromDifferentHome(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "home/gate mismatch") {
 		t.Fatalf("push from different home error = %v, want explicit home/gate mismatch", err)
 	}
+	t.Logf("daemon home repo dir=%s", p.RepoDir(repoID))
+	t.Logf("supplied foreign gate=%s", wrongGate)
+	t.Logf("rejected push: %v", err)
 }
 
 func TestPushReceivedSkipStepsConfiguresExecutor(t *testing.T) {

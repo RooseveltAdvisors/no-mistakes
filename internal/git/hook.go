@@ -19,7 +19,10 @@ const preservedPreReceiveHook = "pre-receive.no-mistakes-user"
 // PreReceiveHookScript returns the fail-closed admission hook that runs before
 // Git mutates any managed gate ref. The daemon authenticates the hook process's
 // ancestry, so a validation-step descendant cannot bypass CLI guards with a
-// direct push.
+// direct push. The script binds NM_HOME to the physical gate home
+// ($GATE_DIR/../..) so admit-push reaches that home's daemon even when the
+// pushing process inherited a different root; derivation failure refuses the
+// push.
 func PreReceiveHookScript() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -134,9 +137,12 @@ func RefreshManagedGateHooks(bareDir string) error {
 
 // PostReceiveHookScript returns the shell script for the post-receive hook.
 // The hook notifies the daemon via the CLI so it works across platforms.
-// It resolves the gate to an absolute bare-repo path before notifying.
-// It never blocks the push - notification failures are surfaced to stderr and
-// appended to notify-push.log inside the bare repo.
+// It resolves the gate to an absolute bare-repo path before notifying and
+// binds NM_HOME to that gate's physical home ($GATE_DIR/../..) so notify-push
+// reaches the owning daemon rather than an inherited NM_HOME.
+// It never blocks the push - notification failures, including a home that
+// cannot be derived, are surfaced to stderr and appended to notify-push.log
+// inside the bare repo.
 func PostReceiveHookScript() string {
 	exe, err := os.Executable()
 	if err != nil {

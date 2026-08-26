@@ -501,6 +501,81 @@ func TestPostReceiveHook_FallsBackToHookLocationForGateDir(t *testing.T) {
 	}
 }
 
+func TestPreReceiveHookFailsClosedWhenGateHomeCannotBeDerived(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pre-receive hook is /bin/sh-only")
+	}
+
+	base, hookPath, called := writeUnresolvableHomeHook(t, preReceiveHookScript)
+	cmd := exec.Command("/bin/sh", hookPath)
+	cmd.Dir = base
+	cmd.Env = unresolvableHomeHookEnv(base)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("pre-receive must reject the push when gate home cannot be derived, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "cannot derive gate home") {
+		t.Fatalf("pre-receive should name the derivation failure, got:\n%s", out)
+	}
+	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+		t.Fatal("admit-push must not run when gate home cannot be derived")
+	}
+	t.Logf("pre-receive fail-closed output:\n%s", out)
+}
+
+func TestPostReceiveHookStaysNonBlockingWhenGateHomeCannotBeDerived(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("post-receive hook is /bin/sh-only")
+	}
+
+	base, hookPath, called := writeUnresolvableHomeHook(t, postReceiveHookScript)
+	cmd := exec.Command("/bin/sh", hookPath)
+	cmd.Dir = base
+	cmd.Env = unresolvableHomeHookEnv(base)
+	cmd.Stdin = strings.NewReader("oldrev newrev refs/heads/main\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("post-receive must stay non-blocking when gate home cannot be derived: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "cannot derive gate home") {
+		t.Fatalf("post-receive should surface the derivation failure, got:\n%s", out)
+	}
+	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+		t.Fatal("notify-push must not run when gate home cannot be derived")
+	}
+	t.Logf("post-receive non-blocking output:\n%s", out)
+}
+
+func writeUnresolvableHomeHook(t *testing.T, script func(string) string) (base, hookPath, called string) {
+	t.Helper()
+	base = t.TempDir()
+	binDir := filepath.Join(base, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An absolute git-dir that does not exist makes `cd "$GATE_DIR/../.."` fail,
+	// which is the fail-closed / non-blocking derivation path.
+	fakeGate := filepath.Join(base, "missing", "repos", "unresolvable.git")
+	fakeGit := filepath.Join(binDir, "git")
+	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\necho "+shellSingleQuote(fakeGate)+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	called = filepath.Join(base, "helper-called")
+	fakeBin := filepath.Join(base, "fake-no-mistakes")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\ntouch "+shellSingleQuote(called)+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hookPath = filepath.Join(base, "hook")
+	if err := os.WriteFile(hookPath, []byte(script(fakeBin)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return base, hookPath, called
+}
+
+func unresolvableHomeHookEnv(base string) []string {
+	return []string{"PATH=" + filepath.Join(base, "bin"), "HOME=" + base}
+}
+
 func TestReceiveHooksRouteToGateHome(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("receive hooks are /bin/sh-only")
@@ -565,12 +640,23 @@ func TestReceiveHooksRouteToGateHome(t *testing.T) {
 			}
 			cmd := exec.Command("git", "-C", work, "push", "gate", "HEAD:refs/heads/main")
 			cmd.Env = env
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("push: %v: %s", err, out)
+			pushOut, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("push: %v: %s", err, pushOut)
 			}
 
 			gateAdmits, gatePushes := gateLog.snapshot()
 			oppositeAdmits, oppositePushes := oppositeLog.snapshot()
+			inherited := "(unset)"
+			if inheritedHome.home == "opposite" {
+				inherited = oppositeHome
+			}
+			t.Logf("inherited NM_HOME=%s", inherited)
+			t.Logf("gate home=%s", gateHome)
+			t.Logf("gate=%s", bare)
+			t.Logf("git push output:\n%s", pushOut)
+			t.Logf("gate socket admit-push=%v notify-push=%v", gateAdmits, gatePushes)
+			t.Logf("opposite home=%s admit-push=%v notify-push=%v", oppositeHome, oppositeAdmits, oppositePushes)
 			if len(oppositeAdmits) != 0 || len(oppositePushes) != 0 {
 				t.Fatalf("opposite home socket received admit=%v notify=%v", oppositeAdmits, oppositePushes)
 			}
