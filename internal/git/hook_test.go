@@ -1,14 +1,35 @@
 package git
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
+
+func init() {
+	if os.Getenv("NM_HOOK_HELPER") != "1" {
+		return
+	}
+	if len(os.Args) < 3 || os.Args[1] != "daemon" {
+		return
+	}
+	if err := runManagedHookHelper(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
 
 func TestPreReceiveHookScript(t *testing.T) {
 	script := preReceiveHookScript("/opt/No Mistakes/no-mistakes")
@@ -485,6 +506,11 @@ func TestReceiveHooksRouteToGateHome(t *testing.T) {
 		t.Skip("receive hooks are /bin/sh-only")
 	}
 
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for _, inheritedHome := range []struct {
 		name string
 		home string
@@ -494,14 +520,20 @@ func TestReceiveHooksRouteToGateHome(t *testing.T) {
 	} {
 		t.Run(inheritedHome.name, func(t *testing.T) {
 			ctx := context.Background()
-			base := t.TempDir()
-			gateHome := filepath.Join(base, "home-b")
-			oppositeHome := filepath.Join(base, "home-a")
+			base, err := os.MkdirTemp("", "nmh-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(base) })
+
+			gateHome := mustResolvedDir(t, filepath.Join(base, "b"))
+			oppositeHome := mustResolvedDir(t, filepath.Join(base, "a"))
 			const repoID = "cross-home-hook"
 			bare := filepath.Join(gateHome, "repos", repoID+".git")
 			if err := InitBare(ctx, bare); err != nil {
 				t.Fatal(err)
 			}
+			bare = mustResolvedPath(t, bare)
 
 			work := filepath.Join(base, "work")
 			runGitOrFatal(t, base, "init", work)
@@ -510,22 +542,14 @@ func TestReceiveHooksRouteToGateHome(t *testing.T) {
 			runGitOrFatal(t, work, "commit", "--allow-empty", "-m", "initial")
 			runGitOrFatal(t, work, "remote", "add", "gate", bare)
 
-			fakeBin := filepath.Join(base, "no-mistakes")
-			marker := filepath.Join(gateHome, "repos", repoID+".git", "socket-received")
-			fakeScript := "#!/bin/sh\n" +
-				"if [ \"$1\" = daemon ] && [ \"$2\" = notify-push ]; then\n" +
-				"  mkdir -p \"$NM_HOME/repos/" + repoID + ".git\"\n" +
-				"  printf '%s\\n' \"$NM_HOME\" > \"$NM_HOME/repos/" + repoID + ".git/socket-received\"\n" +
-				"fi\n" +
-				"exit 0\n"
-			if err := os.WriteFile(fakeBin, []byte(fakeScript), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			gateLog := startHomeIPCServer(t, gateHome)
+			oppositeLog := startHomeIPCServer(t, oppositeHome)
+
 			hooksDir := filepath.Join(bare, "hooks")
-			if err := os.WriteFile(filepath.Join(hooksDir, "pre-receive"), []byte(preReceiveHookScript(fakeBin)), 0o755); err != nil {
+			if err := os.WriteFile(filepath.Join(hooksDir, "pre-receive"), []byte(preReceiveHookScript(exe)), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(hooksDir, "post-receive"), []byte(postReceiveHookScript(fakeBin)), 0o755); err != nil {
+			if err := os.WriteFile(filepath.Join(hooksDir, "post-receive"), []byte(postReceiveHookScript(exe)), 0o755); err != nil {
 				t.Fatal(err)
 			}
 
@@ -545,18 +569,160 @@ func TestReceiveHooksRouteToGateHome(t *testing.T) {
 				t.Fatalf("push: %v: %s", err, out)
 			}
 
-			got, err := os.ReadFile(marker)
-			if err != nil {
-				t.Fatalf("gate-owned notification socket was not reached: %v", err)
+			gateAdmits, gatePushes := gateLog.snapshot()
+			oppositeAdmits, oppositePushes := oppositeLog.snapshot()
+			if len(oppositeAdmits) != 0 || len(oppositePushes) != 0 {
+				t.Fatalf("opposite home socket received admit=%v notify=%v", oppositeAdmits, oppositePushes)
 			}
-			if strings.TrimSpace(string(got)) != gateHome {
-				t.Fatalf("notification home = %q, want gate home %q", strings.TrimSpace(string(got)), gateHome)
+			if len(gateAdmits) != 1 {
+				t.Fatalf("gate home admit-push calls = %d, want 1: %v", len(gateAdmits), gateAdmits)
 			}
-			if _, err := os.Stat(filepath.Join(oppositeHome, "repos", repoID+".git", "socket-received")); !os.IsNotExist(err) {
-				t.Fatalf("notification reached opposite home, stat error: %v", err)
+			if resolvedPath(gateAdmits[0]) != bare {
+				t.Fatalf("admit-push gate = %q, want %q", gateAdmits[0], bare)
+			}
+			if len(gatePushes) != 1 {
+				t.Fatalf("gate home notify-push calls = %d, want 1: %v", len(gatePushes), gatePushes)
+			}
+			if resolvedPath(gatePushes[0]) != bare {
+				t.Fatalf("notify-push gate = %q, want gate %q", gatePushes[0], bare)
 			}
 		})
 	}
+}
+
+type hookHomeIPCLog struct {
+	mu     sync.Mutex
+	admits []string
+	pushes []string
+}
+
+func (l *hookHomeIPCLog) record(command, gate string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch command {
+	case "admit-push":
+		l.admits = append(l.admits, gate)
+	case "notify-push":
+		l.pushes = append(l.pushes, gate)
+	}
+}
+
+func (l *hookHomeIPCLog) snapshot() (admits []string, pushes []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.admits...), append([]string(nil), l.pushes...)
+}
+
+func startHomeIPCServer(t *testing.T, home string) *hookHomeIPCLog {
+	t.Helper()
+	socketPath := paths.WithRoot(home).Socket()
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", socketPath, err)
+	}
+	log := &hookHomeIPCLog{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				scanner := bufio.NewScanner(c)
+				if !scanner.Scan() {
+					return
+				}
+				command, gate, _ := strings.Cut(scanner.Text(), "\t")
+				log.record(command, gate)
+				_, _ = c.Write([]byte("ok\n"))
+			}(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("socket listener at %s did not stop", socketPath)
+		}
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("unix", socketPath, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return log
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("socket at %s never accepted connections", socketPath)
+	return log
+}
+
+func runManagedHookHelper() error {
+	p, err := paths.New()
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialTimeout("unix", p.Socket(), 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("connect to daemon: %w", err)
+	}
+	defer conn.Close()
+
+	command := os.Args[2]
+	switch command {
+	case "admit-push", "notify-push":
+	default:
+		return fmt.Errorf("unexpected daemon helper command %q", command)
+	}
+	if _, err := fmt.Fprintf(conn, "%s\t%s\n", command, helperFlagValue(os.Args[3:], "--gate")); err != nil {
+		return err
+	}
+	reply, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(reply) != "ok" {
+		return fmt.Errorf("daemon socket reply %q", reply)
+	}
+	return nil
+}
+
+func helperFlagValue(args []string, name string) string {
+	for i, arg := range args {
+		if arg == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func mustResolvedDir(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return mustResolvedPath(t, dir)
+}
+
+func mustResolvedPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+func resolvedPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 // gateArgFromArgv returns the value following the first "--gate" token in a
