@@ -163,6 +163,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - GitHub readiness = PR head rollup ∪ Actions workflow runs for that SHA; discovery errors/unknown states fail closed.
 - 6 consecutive `GetChecks` errors on an open PR park CI at ask-user (names provider CLI/creds; GitHub needs `gh` >= 2.50); success resets streak.
 - GitHub pre-run infra failures (`scm.PreRunFailureDetector`, `markPreRunInfraFailures`) re-bucket to cancel and share the cancelled-check rerun budget.
+- GitHub `GetChecks` collapses same-name reruns of one workflow to newest (`startedAt`), AFTER `appendUnrepresentedWorkflowRuns`, never before; keeps independent workflows/external checks/status contexts.
 
 **Parked / Awaiting-Agent Signal**
 
