@@ -244,6 +244,9 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	if !strings.Contains(ag.calls[0].Prompt, "user wanted conflict resolution to preserve the extracted intent") {
 		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)
 	}
+	if !strings.Contains(ag.calls[0].Prompt, dir) || !strings.Contains(ag.calls[0].Prompt, "Path contract:") {
+		t.Fatalf("expected agent prompt to include execution context with workdir, got: %s", ag.calls[0].Prompt)
+	}
 	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
 	// The stopped pick the agent continued is born without its AI trailer.
 	if msg := gitCmd(t, dir, "log", "-1", "--format=%B"); strings.Contains(strings.ToLower(msg), "co-authored-by:") {
