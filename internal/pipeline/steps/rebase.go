@@ -530,12 +530,41 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	defaultBranch := effectivePRBaseBranch(sctx)
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
 	diff, err := git.Diff(ctx, sctx.WorkDir, baseSHA, "HEAD")
-	if err == nil && strings.TrimSpace(diff) == "" {
+	if err == nil && strings.TrimSpace(diff) == "" && !freshDocumentationPush(ctx, sctx, "HEAD") {
 		sctx.Log("empty diff after rebase, skipping remaining steps")
 		return &pipeline.StepOutcome{SkipRemaining: true}, nil
 	}
 
 	return &pipeline.StepOutcome{}, nil
+}
+
+// freshDocumentationPush identifies the one empty-diff case that must still
+// be validated: a new branch push whose only commit is markdown. A stale or
+// cross-home default-branch mirror can make the merge-base equal HEAD, which
+// otherwise makes the empty-diff shortcut skip every downstream gate. Existing
+// branches retain the normal already-merged shortcut.
+func freshDocumentationPush(ctx context.Context, sctx *pipeline.StepContext, head string) bool {
+	if sctx == nil || sctx.Run == nil || !git.IsZeroSHA(sctx.Run.BaseSHA) {
+		return false
+	}
+	parent, err := git.Run(ctx, sctx.WorkDir, "rev-parse", head+"^")
+	if err != nil {
+		return false
+	}
+	files, err := git.DiffNameOnly(ctx, sctx.WorkDir, strings.TrimSpace(parent), head)
+	if err != nil || len(files) == 0 {
+		return false
+	}
+	for _, file := range files {
+		ext := strings.ToLower(filepath.Ext(file))
+		base := strings.ToLower(filepath.Base(file))
+		if ext != ".md" && ext != ".mdx" && ext != ".rst" && ext != ".adoc" &&
+			!strings.HasPrefix(base, "readme") && !strings.HasPrefix(base, "changelog") &&
+			!strings.HasPrefix(base, "contributing") {
+			return false
+		}
+	}
+	return true
 }
 
 func shortSHA(sha string) string {
