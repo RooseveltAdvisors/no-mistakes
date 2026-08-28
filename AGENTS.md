@@ -190,6 +190,10 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - Fix round: focused verification in changed area only; no full-repo test/lint in fix prompt (Test/Lint steps own gates).
 
+**Agent-Invocation Timeouts Report Measured Silence, Never the Budget**
+
+- Diagnostics state observed silence, never the budget; `agentActivity` (`agent_run.go`) owns measurement, resets per attempt. Liveness = streamed text + throttled `LifecyclePhaseActivity` from subprocess stdout/stderr reads (not start/exit); feeds step activity, not log. CI fix-agent timeout parks ask-user (`ciFixAgentTimeoutOutcome`); review timeout fails the run. Regressions: `TestRunAgent_Timeout*`, e2e `TestSilentAgentTimeoutReportsMeasuredEvidence`.
+
 **Local Test (`internal/pipeline/steps/test.go`)**
 
 - Targeted validation only; broad regression is CI (`go test -race ./...` in `.github/workflows/ci.yml`). Empty `commands.test` here by design; do not add full suite locally.
