@@ -172,12 +172,14 @@ func TestUpdateHeadSHA_DocsOnlyFreshPushDoesNotUseEmptyDiffShortcut(t *testing.T
 	}
 	gitCmd(t, dir, "add", "AGENTS.md", "CLAUDE.md")
 	gitCmd(t, dir, "commit", "-m", "update agent guidance")
+	gitCmd(t, dir, "commit", "--allow-empty", "-m", "pipeline bookkeeping")
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	// Model the default-branch mirror already pointing at this fresh head.
 	gitCmd(t, dir, "update-ref", "refs/remotes/origin/main", headSHA)
 
 	zeroSHA := strings.Repeat("0", 40)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, zeroSHA, headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/main"
 	outcome, err := updateHeadSHA(context.Background(), sctx)
 	if err != nil {
 		t.Fatal(err)

@@ -547,11 +547,11 @@ func freshDocumentationPush(ctx context.Context, sctx *pipeline.StepContext, hea
 	if sctx == nil || sctx.Run == nil || !git.IsZeroSHA(sctx.Run.BaseSHA) {
 		return false
 	}
-	parent, err := git.Run(ctx, sctx.WorkDir, "rev-parse", head+"^")
+	base, err := freshPushBase(ctx, sctx.WorkDir, sctx.Run.Branch, head)
 	if err != nil {
 		return false
 	}
-	files, err := git.DiffNameOnly(ctx, sctx.WorkDir, strings.TrimSpace(parent), head)
+	files, err := git.DiffNameOnly(ctx, sctx.WorkDir, base, head)
 	if err != nil || len(files) == 0 {
 		return false
 	}
@@ -565,6 +565,26 @@ func freshDocumentationPush(ctx context.Context, sctx *pipeline.StepContext, hea
 		}
 	}
 	return true
+}
+
+// freshPushBase returns the oldest recorded tip of a branch. A fresh branch's
+// reflog records its creation point, which lets this check cover all commits
+// in a documentation-only push, including an empty tip commit. Falling back
+// to HEAD^ keeps missing reflogs conservative and preserves the old shortcut
+// for the common single-commit case.
+func freshPushBase(ctx context.Context, workDir, branch, head string) (string, error) {
+	branch = strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+	if branch != "" && branch != "HEAD" {
+		entries, err := git.Run(ctx, workDir, "reflog", "show", "--format=%H", "refs/heads/"+branch)
+		if err == nil {
+			lines := strings.Fields(entries)
+			if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+				return strings.TrimSpace(lines[len(lines)-1]), nil
+			}
+		}
+	}
+	parent, err := git.Run(ctx, workDir, "rev-parse", head+"^")
+	return strings.TrimSpace(parent), err
 }
 
 func shortSHA(sha string) string {
