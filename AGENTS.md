@@ -1,38 +1,14 @@
 # AGENTS.md
 
-Agent memory for this repo: invariants and pointers. Deep conditional detail lives in source comments, `docs/`, and regression tests - not here.
+Agent memory for this repo: invariants and pointers. Deep conditional detail lives in source comments, `docs/`, and regression tests - not here. Topic invariants moved to `.agents/skills/*/SKILL.md` (symlinked as `.claude/skills`).
 
 Go CLI `no-mistakes`; entry `cmd/no-mistakes`; layout map: `internal/cli`, `internal/daemon`, `internal/pipeline` (+ `steps`), `internal/agent`, `internal/tui`, `internal/git`, `internal/ipc`, `internal/config`, `internal/db`, `internal/paths`, `internal/types`. Build/test/release: `Makefile`.
 
 After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e behind `e2e` tag); `make e2e` when touching agents/e2e/fixtures; `go build -o ./bin/no-mistakes ./cmd/no-mistakes`.
 
-**Fork Routing**
+**GitLab Backend (`internal/scm/gitlab`)**
 
-- `repos.upstream_url` is the PR base parent; `repos.fork_url` is optional GitHub fork push target.
-- `no-mistakes init --fork-url <url>` expects `origin` at the parent and `<url>` at the fork; plain `init` preserves fork URL on idempotent refresh.
-- Push (including after a CI repair restarts validation) must use `resolvePushURL` (`internal/pipeline/steps/common_git.go`). Non-fork paths recover the credentialled upstream from the worktree `origin` at run time because DB `upstream_url` is redacted. `Repo.PushURL()` is for fork-only callers (e.g. `rebase.go`).
-- GitHub PR: `--repo` parent; `--head <fork_owner>:<branch>` when `fork_url` set. Existing PR lookup: bare branch + filter head owner; never `gh pr list --head <owner>:<branch>`.
-- Non-GitHub fork MR/PR routing is out of scope; legacy `fork_url` on other providers must skip PR creation, not self-PR.
-- Each run best-effort refreshes upstream/fork via `gate.RefreshRepoURLs` (origin authority; fork needs one matching clone remote; atomic DB replace; failures log bounded reason and keep old registration; never rewrite clone/gate remotes). `Repo.URLsVerified` is run-scoped trust for refreshed DB URLs.
-
-**Repository Forge Identity (`internal/forgecontext`)**
-
-- Optional global `forge_profiles` map raw remote host tokens/SSH aliases to one isolated `gh` or `glab` config directory, plus an optional `expected_login` pin. The resolver owns profile selection, validation, parent/fork ambiguity, provider-specific fail-closed activation, and the immutable run environment; do not add ambient account switching or per-step routing. Profile identity for the parent/fork same-profile check is the config directory AND the pin, so conflicting pins fail as ambiguous instead of silently picking one account (`sameProfile`/`expectLogin` own the rationale).
-- A resolved context must reach built-in provider commands, configured shell commands, native agents, managed agent servers, and recovered approval reconciliation. Never mutate the daemon environment or persist credentials/profile selection in the DB; recovery re-resolves from current global config.
-- No configured profiles means exact legacy ambient behavior. Online auth failures keep provider steps' existing skip behavior; deterministic config/routing errors fail before the pipeline. The public contract lives in `docs/src/content/docs/reference/global-config.md`.
-
-**Credential Redaction in Stored URLs and Errors (security)**
-
-- `gate.InitWithFork` redacts upstream via `safeurl.Redact` before every DB persist and gate-init log; bare gate `origin` stays credentialled via `provisionGate`. Push/branch-sync must recover credentials from worktree `origin` (`resolvePushURL`/`resolveUpstreamURL`), never `Repo.UpstreamURL`/`Repo.PushURL()`.
-- Step failures and Bitbucket resolve-repo errors use `safeurl.RedactText`/`safeurl.Redact`. New redaction sites: `internal/safeurl` only.
-- Regressions: `TestInitRedactsCredentialURL`, `TestResolveUpstreamURL_*`, `TestResolvePushURL_ForkWinsOverCredential`.
-
-**Home-Path Redaction in Published PR Content (security)**
-
-- `internal/safepath` sole owner of home-dir redaction (`RedactText` -> `~`); no `filepath.IsAbs`/`VolumeName` in candidate resolution (Windows POSIX `HOME`).
-- `PRStep.buildPRContent` single render boundary (`redactPRContent`), after length caps. Not covered: agent commit subjects, evidence branch.
-- PR body has exactly ONE live attestation marker; neutralize foreign markers at assembly choke point (`appendGeneratedSectionsToCleanBodyWithinLimit`), never per render path.
-- Regressions: `internal/safepath/redact_test.go`, `pr_homepath_test.go`, `TestPRStep_ForeignAttestationsInEveryComponentDoNotShadowTheRealOne`.
+- `glab v1.5x` drift traps in `gitlab.go` comments (host-scoped auth, no `--state opened`, no `--yes` on `mr update`, jobs via API).
 
 **Gitea Backend (`internal/scm/gitea`)**
 
@@ -45,16 +21,6 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - `tea actions runs list`'s array order is not documented as newest-first, and a branch can have more than one run sharing the same head SHA (e.g. a manual UI re-run), so `GetChecks`/`FetchFailedCheckLogs` select the run via `mostRecentRun` (highest numeric run ID) rather than trusting list order or index `[0]`.
 - The comments in `internal/scm/gitea/gitea.go` own the full rationale for each trap.
 
-**Shared PR-Enforcement Action (`.github/actions/require-no-mistakes`)**
-
-- The shared implementation of the `PR must be raised via no-mistakes` gate is a composite action that lets enforcing repositories replace copied, drift-prone scripts. It verifies the signature line, parses the v1 pipeline-step attestation, binds `head_sha` to the PR head, and requires `review`, `test`, and `document` to be `completed`. Callers pin a release tag or commit SHA, never `@main`, which the judged PR can edit. Per-repo configuration is exemptions only (`exempt-authors`, `exempt-bot-authors`, `exempt-head-branches`); which steps are required is deliberately not an input, so no caller can weaken the gate while still reporting the same check name. The action README owns usage; `CONTRIBUTING.md` owns the contributor-facing contract.
-- This repository's own gate (`.github/workflows/no-mistakes-required.yml`) is a thin caller of the action, pinned at an already-published commit SHA. GitHub downloads `uses:` at job setup, so the pin must always name a ref that already carries the action. That pin IS the self-certification guard: a PR editing the action is fully tested on its own head (the Go tests execute the working-tree `verify.py`) while the required check judging it runs the published pinned copy, so the change cannot rewrite its own judge. Bumping the pin is a separate deliberate PR.
-- This repo's automation exemptions stay in the job-level `if:`, not in `exempt-authors`. An in-job exemption still needs the run to start, and a GITHUB_TOKEN PR's run is created in `action_required` and never starts; the `paths-ignore` entries exist for the same reason. Repos without that constraint should prefer the action's inputs.
-- Duplicate step records are LAST-WINS by design (`check_required_steps` in `verify.py`), and a skip-shaped sibling field on a `completed` record is deliberately not inspected. Some pre-migration inline gates were stricter (requiring every record of a name to be `completed`); that strictness is explicitly NOT the standard, and relaxing to last-wins on migration is the intended outcome, not a regression. Do not "harden" this without an owner decision.
-- A caller that gains `head_sha` binding must also drop `synchronize` from `on.pull_request.types`, matching this repository's own post-#773 trigger set. Binding plus `synchronize` pins a stale FAILURE check run to a head the pipeline is about to fix, and `gh pr checks` collapses same-named runs by `startedAt`, so the CI monitor can park the run red forever. That change is only safe where no ruleset or branch protection REQUIRES the check - otherwise a pushed head gets no run and the requirement blocks the merge forever. Verify per repo with `gh api repos/<owner>/<repo>/rulesets` plus `.../branches/<branch>/protection`; at the time of the fleet migration `treehouse`, `sshhip`, and `wheelhouse` required it and therefore keep `synchronize`.
-- Migrating a repository is rarely a one-file swap. Repos whose tests extract and execute the inline `run:` block (an `extractGateScript()` helper and its gate test) break at import once the block is gone, and repo-level `AGENTS.md` notes that tell agents to hand-copy the gate from a sibling repository must be rewritten - that copying is the drift the shared action exists to remove.
-- Regressions: `require_no_mistakes_action_test.go` executes `verify.py` the way a runner does (verdicts, exemption surface, event-payload binding); `workflow_no_mistakes_required_test.go` owns the CALLER - immutable-SHA pin, single delegating step, exemptions, triggers, concurrency identity, fork boundary - and drives the real action through the event payload.
-
 **OpenCode Adapter Failure Reporting (`internal/agent/opencode*.go`)**
 
 - opencode reports a failed turn on `info.error` with an HTTP 200 and no parts, and serializes every named error as `{"name": ..., "data": {...}}` - the payload fields are nested under `data`, never at the top level. Decoding only the flat shape silently blanks the message, and ignoring non-`StructuredOutputError` variants drops the cause entirely so the run reports the undiagnosable `opencode returned no text output`. `opencodeMessageError` owns the wire shape and `opencodeMessageFailure` owns the surfaced error.
@@ -64,86 +30,6 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - That fallback is a second attempt in a fresh session too, and a `session.error` can arrive at any point in a turn, so it carries the same gate: `thinkingConflict` annotates the trigger with `errOpencodeToolsAlreadyRan` when the turn ran a tool and `runOnce` then reports the conflict instead of falling back. Regression: `TestOpencodeAgent_ThinkingConflictAfterToolActivityDoesNotFallBack`.
 - `opencodeMessageError.rawData` keeps the verbatim `data` payload beside the typed `Data`, because thinking/tool_choice detection scans the payload as text (`providerText`) and a decode into the typed struct drops every provider-specific extra it has no field for.
 
-**Documentation**
-
-- `README.md` stays high-level; facts live in `docs/`. Config keys: `docs/src/content/docs/reference/global-config.md`, `repo-config.md`; env/telemetry split: `environment.md`; daemon model: `docs/src/content/docs/concepts/daemon.md`. Guides link; they do not duplicate tables.
-- `document.instructions` in `.no-mistakes.yaml` owns placement policy for the document step.
-
-**Agent-Guidance Surfaces**
-
-- Generated skill: `internal/skill/skill.go` body, then `make skill`; never edit `skills/no-mistakes/SKILL.md` directly.
-- Driving guidance: skill body + live `axi` strings (`internal/cli/axi*.go`); `docs/src/content/docs/guides/agents.md` pins sentences via `axi_guidance_test.go`.
-- `internal/testguidance` default test-quality rule: task-first skill and pipeline roles that author/repair/review tests only.
-- Review auto-fix defaults off (`auto_fix.review: 0`); qualify skill, axi notes, and docs if you change it.
-
-**Unified Agent Tuning (`internal/agentcfg`)**
-
-- `agentcfg` is the single owner of the harness-neutral model/effort surface and of the mapping down to each harness's native mechanism (claude/copilot `--effort`, codex `-m` + `-c model_reasoning_effort`, grok `--reasoning-effort`, pi `--thinking`, opencode's session-message `model`/`variant`, acpx `--model` for `cursor`/`acp:<target>`). Add a harness there, not in an adapter or in eval. `rovodev` and `antigravity` are deliberately declared unmappable, so a request for them is a config error rather than a flag that is silently ignored.
-- `agent.NewWithOptions` is the one funnel: it validates `Options.Profile` and splices the mapped args after the operator's raw `agent_args_override` args, so both the pipeline (`cfg.AgentProfileFor`) and eval replay (`Candidate.Profile()`) reach every harness by the same path. Never re-derive a model or effort flag at a call site.
-- Precedence is fixed: a raw `agent_args_override` flag that already pins a knob natively wins and the mapped value is not emitted, which is what keeps every pre-`agent_config` configuration byte-identical and stops a harness receiving one knob twice. `agent_config` is global-only for the same reason as `agent_args_override`.
-- Eval candidates are `agent,model=<model>[,effort=<level>]` (the previous `agent+model` spelling is refused with a migration message), effort is part of the persisted candidate identity, and `agentNeutralGlobalConfig` strips `agent`, `agent_args_override`, and `agent_config` so a replay never inherits the capturing machine's pins.
-- Regressions: `internal/agentcfg`, `internal/agent/profile_test.go`, `internal/config/config_agent_config_test.go`, `internal/daemon/pipeline_agent_profile_test.go`, `TestParseCandidate*`, `TestReplayPinsCandidateModelAndEffortOnTheHarness`, `TestCaptureStripsEveryHarnessPinFromThePinnedConfig`.
-
-**Context, Concurrency, and Processes**
-
-- Thread `context.Context`; `exec.CommandContext`; timeouts on networked work.
-- Long-lived cancellable children: `shellenv.ConfigureShellCommand` (process group + `cmd.Cancel`). One-shots: `RunShellCommand`/`OutputShellCommand`/`CombinedOutputShellCommand`, or `StartShellCommand` + `TerminateShellCommandGroup` - `cmd.Cancel` alone does not reap on clean exit (#357 OOM). `WaitDelay` 5s backstop. Regressions: `TestCodexAgent_Run_ReapsLeakedGrandchildOnCleanExit`, `TestRunShellCommandWithEnv_*`, `TestTerminateShellCommandGroup_*`.
-- `internal/procreap`: cwd-under-worktree identity reaping; spares pending/running runs; startup + per-run sweeps. Windows: job objects. Regressions: `internal/procreap`, sweep tests.
-- Windows console children: `winproc.Harden(cmd)` (`shellenv` already calls it).
-- `procreap` reach: `<NM_HOME>/worktrees` by shape plus only run-recorded worktrees in configured roots; sweep before every worktree removal (`SweepRunWorktree`).
-
-**Recursive Gate-Execution Containment**
-
-- `internal/gatecontext` classifies nested pipeline control (gate common-dir + IPC peer ancestry); `NO_MISTAKES_GATE` diagnostic only. Read-only axi status/logs, help, doctor stay available.
-- Phase boundary: `internal/gateguidance` in prompts and generated skill; step agents never control push/PR/CI.
-
-**Filesystem and Paths**
-
-- `filepath.Join`; `NM_HOME` for state; `0o755` dirs / `0o644` files. macOS: resolve symlinks for comparisons.
-- Run worktree placement (`worktree_roots`): `internal/worktrees`; decided once at run creation, persisted in `runs.worktree_dir`; consumers read via `worktrees.RecordedDir`, never re-derive. `worktrees.CheckPlacement` single unusable-root policy; `init` refuses the same set. Compare paths via `worktrees.Canonical`/`Contains`.
-
-**Git on Bare Gate Repos (`safe.bareRepository`)**
-
-- Gate git via `git.Run` (`--git-dir` on bare); never bare discovery via `cmd.Dir`/`-C` (#362). Migration DB-authoritative; `git.RunBare` on legacy paths. Regressions: `TestRunOnBareRepoUnderSafeBareRepositoryExplicit`, migration tests.
-
-**`gh` From Bare Gate (`internal/scm/github`)**
-
-- Name PR explicitly (`prSelector`: number, else URL, else fail closed). Empty positional infers `main` and misses feature PRs.
-- Regressions: `TestGetChecksTargetsKnownPRByURLWhenNumberMissing`, `TestPRTargetingReadsFailClosedWithoutIdentity`, `TestUpdatePR*`.
-
-**Post-Receive Hook (`internal/git/hook.go`)**
-
-- `--gate` must be absolute (not `$(pwd)` / `.` #269). `normalizeNotifyGatePath` in `daemon_cmd.go` second layer.
-
-**Daemon Singleton Lock (`internal/daemon/lock.go`)**
-
-- One daemon per `NM_HOME`: exclusive `daemon.lock` first in `RunWithOptions`, before recovery/socket; held for life.
-- Readiness = IPC health, not PID alone; stop waits for process exit (releases lock). Socket: dial-before-unlink; bounded dial (`daemon_connect_timeout`). `daemon run --root` explicit only.
-- Never remove worktrees with `pending`/`running` runs. User model: `docs/src/content/docs/concepts/daemon.md`.
-- Cleanup/eject in a configured worktree root act only on recorded run worktrees, never enumerate.
-
-**Bounded Logging and Event-Driven AXI**
-
-- `internal/logstore` bounds daemon/managed/bootstrap logs. Read IPC at DEBUG; mutations INFO; failures WARN.
-- `internal/cli/run_reconciler.go` owns subscribe-first axi driving; no fixed `get_run` polling.
-
-**Bounded Loss-Aware Event Subscriptions**
-
-- `ipc/events.go` `ClassOf` taxonomy; `daemon/eventmailbox.go` overflow (64 events, 1 MiB; activity evictable; `stream_gap` sticky).
-- `StateRev` on state + snapshots; subscriptions open gapped. Step diff on demand: `ipc.MethodGetStepDiff` (512 KiB cap), not stream.
-
-**Destructive Daemon Lifecycle Guard (`internal/lifecycle/guard.go`)**
-
-- `daemon stop`/`restart`/`update` refuse with active runs unless `--force`; log caller to `<NM_HOME>/logs/cli.log`.
-
-**Testing Conventions**
-
-- E2e for cross-boundary behavior (`e2e` tag; `make e2e` / `scripts/e2e.sh`). Real git temp dirs over mocks.
-- `internal/e2edaemon` owns test daemons; never reap shared `~/.no-mistakes`.
-- Git packages: unset `GIT_CONFIG_COUNT` in `TestMain`. Daemon-touching packages: isolated `NM_HOME`/`HOME` in `TestMain`.
-- `paths.New()` refuses default root under `go test` unless `NO_MISTAKES_ALLOW_DEFAULT_ROOT_IN_TESTS=1`.
-- Windows CI: git-heavy shard split; `*_windows_test.go` suffix is GOOS-only. macOS `-race` git segfault: fork pre-exec child, not repo bug.
-
 **Repo Config Trust Boundary (security)**
 
 - `commands.{test,lint,format}` and `agent` from trusted default branch pinned SHA, never pushed SHA (`loadTrustedRepoConfig`, `assertGateTrustedConfigReadable`).
@@ -151,19 +37,6 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
 - `pr.base_branch` trusted-only but honors `allow_repo_commands` opt-in; existing PR forge base (`scm.PRBaseBranchReader`) wins for CI repair/tip monitoring; PR lookup by branch only. Semantics: `repo-config.md`.
-
-**CI Monitor Lifecycle**
-
-- `ci_timeout` idle; re-arms on default-branch tip via `timeoutAnchor` only extends. Semantics: `config.go` + `global-config.md`.
-- Empty check list not green without proof; trusted `no_ci` with zero checks OK (`ci.go`, `cimonitor`).
-- `axi abort --run <id>` reaps orphan monitor without daemon. Terminal PR state monotonic; completes active runs.
-- Cancelled checks: rerun before CI fix; budget per name; no rerun after head != `runs.head_sha`. `ci_transient.go` owns classification/retirement.
-- Terminal cancel bucket != pending (#628). Live rollup head, not recorded SHA only.
-- Regressions: `TestCIStep_*`, `TestChecksPassed_PR607RealLogSequence`, `TestEffectiveRepoConfig_NoCITrustedOnly`.
-- GitHub readiness = PR head rollup ∪ Actions workflow runs for that SHA; discovery errors/unknown states fail closed.
-- 6 consecutive `GetChecks` errors on an open PR park CI at ask-user (names provider CLI/creds; GitHub needs `gh` >= 2.50); success resets streak.
-- GitHub pre-run infra failures (`scm.PreRunFailureDetector`, `markPreRunInfraFailures`) re-bucket to cancel and share the cancelled-check rerun budget.
-- GitHub `GetChecks` collapses same-name reruns of one workflow to newest (`startedAt`), AFTER `appendUnrepresentedWorkflowRuns`, never before; keeps independent workflows/external checks/status contexts.
 
 **Parked / Awaiting-Agent Signal**
 
@@ -173,86 +46,13 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - `axi status`/`axi logs` implicit run: current branch's active, else most recent, else none; no repo-wide fallback; detached HEAD resolves nothing. Cross-branch: `--run <id>` renders `other_branch_run:` + `current_branch:`; explicit `--run` is observation-only. Regressions: `axi_status_branch_test.go`.
 
-**Review-Loop Sessions (`internal/pipeline/sessions.go`)**
-
-- One fixer session per run; every review turn session-free (rereview never resumes prescriber session). Fail-safe: cold on unsupported adapter; failed resume retries fresh; `session_reuse: false` forces cold.
-- Codex resume narrower flags; fakeagent parses both argv shapes.
-
-**Recorded Human Decisions on Findings**
-
-- Approve/skip/abort on a gated round with findings record decline (`recordDeclinedRound`); never erase an existing selection. Decline = complement of selection (excludes `auto_fix`). `roundHistoryPromptSection` carries this step, other steps, and earlier runs' branch decisions (`BindBranchDecisions`); advisory, fail-open. Semantics: `docs/src/content/docs/reference/pipeline-steps.md`.
-
-**Uncertified Review (`internal/pipeline/uncertified.go`)**
-
-- Review fixer commit without completed rereview persists per-branch range; next initial review binds `fixRoundProvenanceClause`. Clear only on completed review at/after `to_sha`; rebase remaps SHAs.
-
-**Review Fixer Verification (`internal/pipeline/steps/review.go`)**
-
-- Fix round: focused verification in changed area only; no full-repo test/lint in fix prompt (Test/Lint steps own gates).
-
-**Agent-Invocation Timeouts Report Measured Silence, Never the Budget**
-
-- Diagnostics state observed silence, never the budget; `agentActivity` (`agent_run.go`) owns measurement, resets per attempt. Liveness = streamed text + throttled `LifecyclePhaseActivity` from subprocess stdout/stderr reads (not start/exit); feeds step activity, not log. CI fix-agent timeout parks ask-user (`ciFixAgentTimeoutOutcome`); review timeout fails the run. Regressions: `TestRunAgent_Timeout*`, e2e `TestSilentAgentTimeoutReportsMeasuredEvidence`.
-
-**Local Test (`internal/pipeline/steps/test.go`)**
-
-- Targeted validation only; broad regression is CI (`go test -race ./...` in `.github/workflows/ci.yml`). Empty `commands.test` here by design; do not add full suite locally.
-- Test agent turns bounded by `test_agent_timeout` (default 30m, global-only); stall fails the run.
-- All other agent invocations bounded by `agent_timeout` (default 30m, global-only) at `pipeline.RunAgent`/executor `timeoutAgent`; sooner deadlines honored; late success rejected.
-
-**Intent Provenance (`internal/pipeline/steps/intent_prompt.go`)**
-
-- Explicit `--intent` -> agent source (authoritative criteria); inferred keeps hint framing. Agent-source conformance contradictions -> `ask-user` at review. Pre-push review strips deferred pipeline-delivery-only findings (`pipeline_delivery.go`). Missing finding `action` -> `ask-user` (`ActionOrDefault`).
-
-**Test Evidence (orphan branch)**
-
-- Evidence in `StepContext.EvidenceDir`, never on code branch. `internal/evidence` fail-closed publish; links pin commit; `test.evidence.branch` trusted-only.
-
-**Scratch Paths**
-
-- Evidence under `<NM_HOME>/evidence/<runID>` (`paths.EvidenceDir`), never `os.TempDir()`. Executor resolves once into `StepContext.EvidenceDir`. Eval replay sandboxes stay in system temp (held scope).
-
 **Document+Lint Housekeeping**
 
 - Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
 
-**Local Eval (`internal/eval`)**
-
-- Global-only keys in `config.yaml` (not env); auto-capture after terminal outcome. Gold by recorded fix/skip + merge; `diversified` pinned gold-only. Shared object pools, not per-case bundles. Details: `docs/src/content/docs/reference/eval.md`.
-- Eval subcommands idempotent (`internal/eval/idempotency_test.go`); replay never rewrites case labels/manifests. Dashboards: `internal/cli/eval_render.go`.
-
 **Telemetry**
 
 - Read surfaces: no pageview; `ReadSurfaceGate` on fingerprint. Perf local-only (`agent_invocations`); remote terminal run event counts only. `internal/agent/invocationmetrics.go` owns fidelity fields.
-
-**Branch Sync (`internal/branchsync`)**
-
-- `sync`/`axi sync`/TUI `u`: guarded FF or equivalent-diverged reset; `--recover` and `--keep-local` rules in `Recover` doc comment in `sync.go`. Push bindings persist SHA/fingerprint/generation. Cancellation unmoved head -> `user_owned`, not recoverable custody.
-- Each network remote op gets its own child deadline (`Service.RemoteTimeout`, global-only `branch_sync_remote_timeout`, default 60s).
-- Terminal moved-head runs pin unpublished head at `refs/no-mistakes/recover/<run>`; recovery reads that ref, not gate branch; equal/ahead anchors locally but available gate evidence must agree. Missing/conflicting evidence or dirty/divergent import fails closed to manual reconciliation.
-
-**Post-Review Head Continuity and Push**
-
-- Post-review steps call `assertPipelineHeadContinuity`. Push uses `review_approved_head_sha` only (exact or descendant), not mutable `HEAD`/`head_sha`.
-
-**Rebase and Force-Push Safety (`internal/pipeline/steps/forcepush.go`)**
-
-- Prefer refuse over clever recovery. Rebase bases from fresh remote refs; unpushed local default commits park (#283).
-- `resolveForcePushDecision`: live remote read; allow only safe anchors; fetch failure fails closed.
-- `lastSeenSHA` is last observed head (run/prior-run push provenance or remote-tracking ref; #837), not live tip before push (#281); rebase refreshes `origin/<branch>` on normal push only, not force push.
-- CI repairs commit locally and restart validation at Review; later Push owns remote update and force-push safety.
-
-**macOS Release Signing**
-
-- Developer ID `com.kunchenguid.no-mistakes`, Team `9T2J7MNUP9` permanent. `.github/workflows/release.yml`; `TestReleaseWorkflow*`.
-
-**GitLab Backend (`internal/scm/gitlab`)**
-
-- `glab v1.5x` drift traps in `gitlab.go` comments (host-scoped auth, no `--state opened`, no `--yes` on `mr update`, jobs via API).
-
-**When Making Changes**
-
-- New dependencies: check docs, discuss. TDD for bugs and features.
 
 ## Maintaining this file
 
