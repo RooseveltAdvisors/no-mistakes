@@ -33,7 +33,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 **Repo Config Trust Boundary (security)**
 
 - `commands.{test,lint,format}` and `agent` from trusted default branch pinned SHA, never pushed SHA (`loadTrustedRepoConfig`, `assertGateTrustedConfigReadable`).
-- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`. `allow_repo_commands` default false on trusted branch only.
+- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, the whole `ci` block. `allow_repo_commands` default false on trusted branch only.
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
 - `pr.base_branch` trusted-only but honors `allow_repo_commands` opt-in; existing PR forge base (`scm.PRBaseBranchReader`) wins for CI repair/tip monitoring; PR lookup by branch only. Semantics: `repo-config.md`.
