@@ -50,6 +50,10 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
 
+**Pipeline Step Tests (CI latency)**
+
+- Fake `gh`/`glab`/`git` (and the trailer-strip stand-in) are the non-race `internal/pipeline/fakecli` helper (`stepstest.Init`/`LinkFakeCLI`); never re-exec the race test binary. CI-monitor tests live in `steps/citest`; both run under `go test ./...`.
+
 **Telemetry**
 
 - Read surfaces: no pageview; `ReadSurfaceGate` on fingerprint. Perf local-only (`agent_invocations`); remote terminal run event counts only. `internal/agent/invocationmetrics.go` owns fidelity fields.
