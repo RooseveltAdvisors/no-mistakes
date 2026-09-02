@@ -46,6 +46,14 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - `runs.awaiting_agent_since` set only at approval/fix_review gates; observability only.
 
+**Approval Override Is Never a Silent Clean Pass (`pipeline.ApprovalOverrideVerifier`)**
+
+- Only `CIStep` implements it; both `ActionApprove` sites route through `Executor.applyApprovalOverride`. Approval always proceeds; unresolved or verify-error marks `db.SetStepOverrideReason` (fail closed). Reason rides `run_completed` (`ipc.Event.CIOverrideReason`) for the TUI banner. Tests: `executor_approval_override_test.go`, `ci_approval_override_test.go`.
+
+**Stale Actions Event Replay (`require-no-mistakes`)**
+
+- `verify.py` reads PR body/head SHA via live REST lookup (`live_pr_facts`) before `GITHUB_EVENT_PATH` when no explicit inputs; reruns replay stale archived events. Tests: `require_no_mistakes_action_test.go`.
+
 **AXI Run Resolution Is Branch-Scoped (`resolveRun`, `internal/cli/axi_query.go`)**
 
 - `axi status`/`axi logs` implicit run: current branch's active, else most recent, else none; no repo-wide fallback; detached HEAD resolves nothing. Cross-branch: `--run <id>` renders `other_branch_run:` + `current_branch:`; explicit `--run` is observation-only. Regressions: `axi_status_branch_test.go`.
