@@ -54,6 +54,86 @@ func TestParseReviewFindingsJSON(t *testing.T) {
 	}
 }
 
+func cleanReviewFindings() Findings {
+	return Findings{
+		Items:         []Finding{},
+		Summary:       "clean",
+		RiskLevel:     "low",
+		RiskRationale: "clean",
+		RiskScope:     types.FindingsRiskScopeSourceOrExternal,
+	}
+}
+
+// TestReviewStep_UnrunAnalyzerDoesNotApprove pins issue #703's review half: a
+// review whose analyzer produced no structured output, or one whose risk
+// assessment is absent, must fail the step rather than approve on empty
+// findings.
+func TestReviewStep_UnrunAnalyzerDoesNotApprove(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		result *agent.Result
+		want   string
+	}{
+		{
+			name:   "no structured output",
+			result: &agent.Result{Text: "review unavailable"},
+			want:   "review analyzer returned no structured findings",
+		},
+		{
+			name:   "missing risk assessment",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean"}`)},
+			want:   "review analyzer findings missing risk assessment",
+		},
+		{
+			name:   "null findings array",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":null,"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer findings missing findings array",
+		},
+		{
+			name:   "blank risk rationale",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":" \t","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer findings missing risk assessment",
+		},
+		{
+			name:   "unknown finding severity",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"critical","description":"unhandled error","action":"auto-fix"}],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer finding 0 missing severity",
+		},
+		{
+			name:   "invalid risk level",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"critical","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer findings invalid risk level",
+		},
+		{
+			name:   "blank risk scope",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":" "}`)},
+			want:   "review analyzer findings missing risk assessment",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return tc.result, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+			outcome, err := (&ReviewStep{}).Execute(sctx)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Execute() error = %v, want %q", err, tc.want)
+			}
+			if outcome != nil {
+				t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
+			}
+		})
+	}
+}
+
 func TestParseReviewFindingsJSON_RejectsGarbage(t *testing.T) {
 	if _, err := parseReviewFindingsJSON([]byte("not JSON")); err == nil {
 		t.Fatal("expected garbage reviewer output to fail")
@@ -196,7 +276,7 @@ func TestReviewStep_EachRoundGetsItsOwnAgentBudget(t *testing.T) {
 	}
 	var calls []call
 
-	findings := `{"findings":[{"file":"a.txt","line":1,"severity":"warning","action":"auto-fix","description":"tidy"}]}`
+	findings := `{"findings":[{"file":"a.txt","line":1,"severity":"warning","action":"auto-fix","description":"tidy"}],"risk_level":"low","risk_rationale":"tidy finding","risk_scope":"source-or-external"}`
 	ag := &mockAgent{
 		name: "budget-probe",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -213,7 +293,7 @@ func TestReviewStep_EachRoundGetsItsOwnAgentBudget(t *testing.T) {
 			if len(calls) == 1 {
 				return &agent.Result{Output: json.RawMessage(findings)}, nil
 			}
-			return &agent.Result{Output: json.RawMessage(`{"findings":[]}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}, nil
 		},
 	}
 
@@ -266,7 +346,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 				return &agent.Result{Output: json.RawMessage(`{"summary":"  'address review findings.'  "}`)}, nil
 			}
 			// Review call — return clean findings
-			findings := Findings{Items: nil, Summary: "all clear"}
+			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal}
 			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
 		},
@@ -377,7 +457,7 @@ func TestReviewStep_SourceContentFindingFollowsNormalFixFlow(t *testing.T) {
 					Action:      types.ActionAutoFix,
 					File:        "app_test.go",
 					Description: "new test only greps implementation source for a required token",
-				}}})
+				}}, RiskLevel: "low", RiskRationale: "source finding", RiskScope: types.FindingsRiskScopeSourceOrExternal})
 				return &agent.Result{Output: output}, nil
 			case 2:
 				assertTestQualityRulePrompt(t, opts.Prompt)
@@ -388,7 +468,7 @@ func TestReviewStep_SourceContentFindingFollowsNormalFixFlow(t *testing.T) {
 			case 3:
 				assertTestQualityRulePrompt(t, opts.Prompt)
 				assertTestQualityReviewerAction(t, opts.Prompt)
-				output, _ := json.Marshal(Findings{Summary: "clean"})
+				output, _ := json.Marshal(cleanReviewFindings())
 				return &agent.Result{Output: output}, nil
 			default:
 				return nil, fmt.Errorf("unexpected agent call %d", calls)
@@ -430,7 +510,7 @@ func TestReviewStep_ConcurrentHeadResetCannotGainApproval(t *testing.T) {
 		name: "test",
 		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
 			gitCmd(t, dir, "reset", "--hard", divergentHead)
-			findings, _ := json.Marshal(Findings{Summary: "all clear"})
+			findings, _ := json.Marshal(Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal})
 			return &agent.Result{Output: findings}, nil
 		},
 	}
@@ -470,7 +550,7 @@ func TestReviewStep_FixMode_FocusedVerificationContract(t *testing.T) {
 				os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
 				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 			}
-			j, _ := json.Marshal(Findings{Summary: "clean"})
+			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
 		},
 	}
@@ -509,7 +589,7 @@ func TestReviewStep_DurableFixAdequacyContract(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -601,7 +681,7 @@ func TestReviewStep_IntendedUsageEvidenceContract(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -661,7 +741,7 @@ func TestReviewStep_CounterexampleConstructionIsUnconditional(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -713,7 +793,7 @@ func TestReviewStep_AuthorizationPrivacyTracingContract(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -787,7 +867,7 @@ func TestReviewStep_RereviewTreatsFixRoundsAsPipelineAuthoredCode(t *testing.T) 
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
 					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 				}
-				j, _ := json.Marshal(Findings{Summary: "clean"})
+				j, _ := json.Marshal(cleanReviewFindings())
 				return &agent.Result{Output: j}, nil
 			},
 		}
@@ -817,7 +897,7 @@ func TestReviewStep_RereviewTreatsFixRoundsAsPipelineAuthoredCode(t *testing.T) 
 		t.Parallel()
 		dir, baseSHA, headSHA := setupGitRepo(t)
 
-		findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+		findingsJSON, _ := json.Marshal(cleanReviewFindings())
 		ag := &mockAgent{
 			name: "test",
 			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -842,7 +922,7 @@ func TestFixRoundProvenanceClause_EmitsForUncertifiedRangeWhenNotFixing(t *testi
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -906,7 +986,7 @@ func TestUncertifiedRange_PersistsThenFeedsNextInitialReview(t *testing.T) {
 		t.Fatalf("fixer commit did not persist range: %#v", persisted)
 	}
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	reviewAgent := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -976,7 +1056,7 @@ func TestReviewStep_RoundHistorySanitizesAgentInput(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1047,7 +1127,7 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 			t.Parallel()
 			dir, baseSHA, headSHA := setupGitRepo(t)
 
-			findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+			findingsJSON, _ := json.Marshal(cleanReviewFindings())
 			ag := &mockAgent{
 				name: "test",
 				runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1123,7 +1203,9 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 					Action:      types.ActionAskUser,
 					Description: "the fix deletes the intent-required guarded stale-lock removal, leaving rejected retry-only",
 				}},
-				RiskLevel: "high",
+				RiskLevel:     "high",
+				RiskRationale: "intent contradicted",
+				RiskScope:     types.FindingsRiskScopeSourceOrExternal,
 			}
 			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
@@ -1162,7 +1244,7 @@ func reviewPromptFor(t *testing.T, rules []config.PathInstruction) string {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			j, _ := json.Marshal(Findings{Summary: "clean"})
+			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
 		},
 	}
@@ -1251,7 +1333,7 @@ func TestReviewStep_PushedIgnorePatternsCannotSuppressPathInstructions(t *testin
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			j, _ := json.Marshal(Findings{Summary: "clean"})
+			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
 		},
 	}
@@ -1309,7 +1391,7 @@ func TestReviewStep_PromptClassifiesFindingsByRemedyScope(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1357,7 +1439,7 @@ func TestReviewStep_FixPromptPrefersSimplificationOverMachinery(t *testing.T) {
 			if callCount == 1 {
 				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 			}
-			j, _ := json.Marshal(Findings{Summary: "clean"})
+			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
 		},
 	}
@@ -1412,7 +1494,7 @@ func TestReviewStep_RereviewOffersRevertExitFromPriorRoundMachinery(t *testing.T
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
 					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 				}
-				j, _ := json.Marshal(Findings{Summary: "clean"})
+				j, _ := json.Marshal(cleanReviewFindings())
 				return &agent.Result{Output: j}, nil
 			},
 		}
@@ -1446,7 +1528,7 @@ func TestReviewStep_RereviewOffersRevertExitFromPriorRoundMachinery(t *testing.T
 		t.Parallel()
 		dir, baseSHA, headSHA := setupGitRepo(t)
 
-		findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+		findingsJSON, _ := json.Marshal(cleanReviewFindings())
 		ag := &mockAgent{
 			name: "test",
 			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1470,7 +1552,7 @@ func TestReviewStep_RereviewOffersRevertExitFromPriorRoundMachinery(t *testing.T
 		t.Parallel()
 		dir, baseSHA, headSHA := setupGitRepo(t)
 
-		findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+		findingsJSON, _ := json.Marshal(cleanReviewFindings())
 		ag := &mockAgent{
 			name: "test",
 			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1498,7 +1580,7 @@ func TestReviewStep_SimplificationSectionContract(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
-	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	findingsJSON, _ := json.Marshal(cleanReviewFindings())
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1645,7 +1727,7 @@ func TestReviewStep_FixPromptPrefersRemovalOfUnrequiredPaths(t *testing.T) {
 			if callCount == 1 {
 				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 			}
-			j, _ := json.Marshal(Findings{Summary: "clean"})
+			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
 		},
 	}
