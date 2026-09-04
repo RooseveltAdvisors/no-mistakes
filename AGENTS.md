@@ -55,6 +55,11 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - `verify.py` reads PR body/head SHA via live REST lookup (`live_pr_facts`) before `GITHUB_EVENT_PATH` when no explicit inputs; reruns replay stale archived events. Tests: `require_no_mistakes_action_test.go`.
 
+**Custody Recovery (`internal/branchsync`)**
+
+- Missing-head keep-local (#958): `missingHeadKeepLocalRuns` checked first; verified head absent from worktree+gate with compatible recovery refs offers `recover_custody` via `--recover --keep-local` (explicit discard); plain `--recover` refuses.
+- Bound-archive keep-local (#954): `recoverySourceAvailable` returns `recoverySourceProof`; divergent head counts only via exactly one revalidated `recovery_archives` binding (`refs/heads/archive/*`); `recoverKeepLocalFromArchive` revalidates and rolls back gate branch on stamp failure. Any bad evidence fails closed without Git mutation. Regressions: `TestBoundArchive*`, `recover_test.go`, `sync_test.go`.
+
 **AXI Run Resolution Is Branch-Scoped (`resolveRun`, `internal/cli/axi_query.go`)**
 
 - `axi status`/`axi logs` implicit run: current branch's active, else most recent, else none; no repo-wide fallback; detached HEAD resolves nothing. Cross-branch: `--run <id>` renders `other_branch_run:` + `current_branch:`; explicit `--run` is observation-only. Regressions: `axi_status_branch_test.go`.
