@@ -133,7 +133,7 @@ When the CI step is still monitoring an open PR and checks are green - or the tr
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
 If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
 The monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
-Use `no-mistakes rerun` only after that monitor is no longer running, such as a closed PR, aborted or superseded run, idle timeout, or exhausted CI auto-fix attempts.
+After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the restart conditions.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
 `passed-with-override` is a completed run whose CI approval gate was approved by a human while a live check was still failing; it stays a success but reads distinctly from a genuinely green `passed`, and its `help` names the failure the operator approved past.
 `passed-with-skips` is a completed run where PR publication or CI verification automatically skipped because its provider was unavailable, or CI had no PR URL. It retains exit code 0: missing verification is not a failing code verdict. `run.automatic_skips` names each affected step and cause, and `run.head_sha` gives the full recorded head in both drive output and `axi status`. Report that missing evidence; this outcome does not establish CI readiness or a merge. Explicit per-run skips retain their existing behavior. If the run also has a CI approval override, `passed-with-override` takes precedence and the automatic skip causes remain visible. Legacy rows without a recorded skip cause keep their prior classification; their logs remain inspectable.
@@ -253,7 +253,7 @@ Status uses the same `recoverySourceAvailable` classification as recovery and ac
 
 A verified archive plan reports its evidence in `branch_sync.recovery`, keeps `next_action.code: recover_custody`, and sets the command to exactly `no-mistakes axi sync --recover --keep-local`. That action leaves the worktree and local branch at `recovery.required_head`, leaves the divergent archive at `recovery.preserved_head`, and never merges, replays, fast-forwards, resets to, or otherwise selects the archived history. Running plain `--recover` against this plan refuses without adding an anchor or moving a ref.
 
-`no-mistakes rerun` is the alternative exit for ordinary preserved-head recovery that resumes validating the preserved head instead of taking the branch back; it is not offered for the archive-backed keep-local plan.
+For the alternative validation path and its refusal conditions, see [`no-mistakes rerun`](#no-mistakes-rerun); it is not offered for the archive-backed keep-local plan.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
 
@@ -349,14 +349,23 @@ is stale. The command refuses instead of falling back to the gate branch when
 the run-specific recovery ref is conflicting, invalid, or the recorded head is
 unavailable. Use `no-mistakes axi status` and reconcile custody first in that
 case.
+When invoked from a clean worktree, `rerun` also refuses if that worktree's HEAD
+differs from the selected gate or preserved head, before starting or superseding
+any run. The error names both full commit SHAs;
+inspect `no-mistakes axi status` and follow its custody guidance, then use
+`no-mistakes axi run` to submit local commits. The refusal leaves both branches
+unchanged; rerun never replaces its selected head with the caller's head.
+The same check applies to `axi run`'s rerun fallback after an up-to-date push.
+Dirty worktrees and callers without clean-head evidence, including TUI reruns,
+retain the existing selection behavior.
 If the selected prior run has explicit intent, rerun inherits it exactly by default;
 otherwise it performs fresh intent inference. `--intent` supplies a new canonical
 explicit intent in either case. Inherited intent keeps distinct rerun provenance;
 an override is recorded as newly supplied explicit intent, while fresh inference
 records the transcript source. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
-failed or cancelled outcome, or after you have committed a separate fix outside
-an active run; do not use it to bypass a gate.
+failed or cancelled outcome; use `axi run` for separate local fixes, and do not
+use rerun to bypass a gate.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |

@@ -435,10 +435,15 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 		return "", fmt.Errorf("push %q to gate: %v", branch, pushErr)
 	}
 
-	// No run appeared: the push was likely up-to-date. Rerun the latest gate
-	// head so `axi run` is still useful when there are no new commits.
+	// No run appeared: the push was likely up-to-date. Refresh the caller's
+	// clean-head evidence because it may have changed while waiting above.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, baseBranch), &rr); err != nil {
+	params := rerunParams(env.repo.ID, branch, skipSteps, intent, baseBranch)
+	params.CallerHeadSHA, err = rerunCallerHead(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := env.client.Call(ipc.MethodRerun, params, &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
