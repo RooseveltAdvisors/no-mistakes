@@ -189,7 +189,10 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
 	}
-	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("check %s changes: %w", stepName, err)
+	}
 	if strings.TrimSpace(status) == "" {
 		sctx.Log("no agent changes to commit")
 		return nil
@@ -211,7 +214,7 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err != nil {
 		return fmt.Errorf("strip AI co-author trailers from %s commit message: %w", stepName, err)
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
+	if err := stagePipelineChanges(sctx); err != nil {
 		return fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
 	if err := commitPipelineCorrection(ctx, sctx.WorkDir, commitMessage, sctx.Log); err != nil {
