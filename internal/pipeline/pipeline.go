@@ -7,6 +7,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -18,8 +19,10 @@ type StepContext struct {
 	Run                   *db.Run
 	Repo                  *db.Repo
 	WorkDir               string
+	GateDir               string
 	Agent                 agent.Agent
 	Config                *config.Config
+	ForgeContext          *forgecontext.Context
 	DB                    *db.DB
 	Log                   func(string) // discrete log line (newline-terminated, user-visible + file)
 	LogChunk              func(string) // raw streaming chunk (user-visible + file)
@@ -61,6 +64,14 @@ type StepContext struct {
 	// UncertifiedPriorRounds are review rounds from the source run that left
 	// the uncertified range. Nil when none apply.
 	UncertifiedPriorRounds []*db.StepRound
+	// PriorBranchDecisions are rounds from EARLIER runs on this branch that
+	// recorded a human decision about their findings. Unlike the uncertified
+	// range above, nothing clears them when a review completes: a decision the
+	// user made about this branch keeps standing until the branch's run history
+	// ages out of the loader's bound. Nil when none apply. Advisory prompt
+	// context only.
+	PriorBranchDecisions          []*db.BranchDecisionRound
+	PriorBranchDecisionsTruncated bool
 	// Sessions manages the run's durable review-fixer session. The session
 	// machinery remains role-generic for legacy recovery; nil runs every
 	// invocation cold.
@@ -75,15 +86,13 @@ type StepContext struct {
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
-// running cold when sessions are unavailable. Only the review step's fixer
-// turns use this; every other agent invocation - including every review turn,
-// which must stay independent of the session that prescribed the fixes under
-// review - goes through sctx.Agent.Run directly and stays session-isolated.
+// running cold when sessions are unavailable. The invocation is bounded by
+// RunAgent's deadline. Only the review step's fixer turns use this; every
+// other agent invocation - including every review turn, which must stay
+// independent of the session that prescribed the fixes under review - goes
+// through RunAgent and stays session-isolated.
 func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (*agent.Result, error) {
-	if sctx.Sessions == nil {
-		return sctx.Agent.Run(sctx.Ctx, opts)
-	}
-	return sctx.Sessions.Run(sctx.Ctx, sctx.Agent, role, opts, sctx.Log)
+	return sctx.runAgent(sctx.Ctx, opts, role)
 }
 
 // StepOutcome is the result of executing a pipeline step.
@@ -94,7 +103,12 @@ type StepOutcome struct {
 	ExitCode      int    // process exit code (0 = success)
 	PRURL         string // PR/MR URL if this step created or found one
 	Skipped       bool   // mark the step as skipped without failing the run
+	SkipReason    string // automatic PR/CI skip cause; explicit per-run skips leave it empty
 	SkipRemaining bool   // skip all subsequent steps (e.g. empty diff after rebase)
+	// RestartFrom asks the executor to re-run validation from this earlier step.
+	// CI repairs use it when policy requires revalidation or continuity cannot be
+	// proven, sending the new local head back through review before push.
+	RestartFrom types.StepName
 	// FixSummary, when non-empty, is the agent's one-line commit summary for
 	// the fix attempt performed during this round. Steps populate it in fix
 	// mode so the executor can persist it on the round record and later
@@ -129,4 +143,30 @@ type Step interface {
 // leaves the gate parked. Implementations must be read-only and fail closed.
 type ApprovalGateReconciler interface {
 	ReconcileApprovalGate(sctx *StepContext) (resolved bool, err error)
+}
+
+// ApprovalOverrideVerifier is implemented by a step whose approval gate exists
+// because of a live, re-checkable external condition (currently: the CI
+// step's failing checks). The executor calls it once, synchronously, at the
+// moment a human answers ActionApprove - never for Skip, Abort, or Fix, which
+// do not claim the step passed. A human's approval always proceeds (this
+// never blocks a deliberate operator decision), but when the condition is
+// still unresolved the executor records the completion as an explicit
+// override (StepResult.OverrideReason, via db.SetStepOverrideReason) instead
+// of silently reporting the same "outcome=passed" a genuinely green run
+// produces. See docs/... incident: an operator approved a CI gate while a
+// stale, already-superseded check-run replay still showed a live failure, and
+// the run reported outcome=passed with no trace of the override.
+//
+// unresolved is a short human-readable reason (e.g. naming the still-failing
+// check) when the condition has not cleared, and "" when it has (the executor
+// then records a plain, unqualified completion exactly as before). err is
+// reserved for a verification failure distinct from "still unresolved" (e.g.
+// the provider could not be reached); implementations should fail closed by
+// treating err as if it were an unresolved condition described by err, and
+// callers do the same rather than silently completing on error, but the
+// approval itself still proceeds either way - this interface only decides
+// how the completion is recorded, never whether it happens.
+type ApprovalOverrideVerifier interface {
+	VerifyApprovalOverride(sctx *StepContext) (unresolved string, err error)
 }

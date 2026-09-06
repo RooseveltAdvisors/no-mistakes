@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,8 +15,10 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/eval"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -23,9 +26,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
 
 // StepFactory creates pipeline steps for a run. Defaults to steps.AllSteps.
@@ -99,6 +104,7 @@ type recoveredRunPlan struct {
 	cfg     *config.Config
 	agent   agent.Agent
 	steps   []pipeline.Step
+	forge   *forgecontext.Context
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -138,7 +144,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if repo == nil {
 		return nil, fmt.Errorf("run repository is missing")
 	}
-	workDir := m.paths.WorktreeDir(repo.ID, run.ID)
+	workDir := worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID)
 	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("worktree is missing")
 	}
@@ -163,7 +169,11 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
-	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath)
+	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolve forge profile: %w", err)
+	}
+	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +191,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		cfg:     cfg,
 		agent:   ag,
 		steps:   execSteps,
+		forge:   forgeCtx,
 	}, nil
 }
 
@@ -245,7 +256,7 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	return cfg, nil
 }
 
-func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error)) (agent.Agent, error) {
+func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
 	if steps.IsDemoMode() {
 		return agent.NewNoop(), nil
 	}
@@ -261,6 +272,8 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		next, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 			ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
 			DisableProjectSettings: cfg.DisableProjectSettings,
+			Profile:                cfg.AgentProfileFor(name),
+			Environment:            environment,
 		})
 		if err != nil {
 			for _, existing := range created {
@@ -281,6 +294,13 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		}
 	}
 	return ag, nil
+}
+
+func forgeEnvironment(ctx *forgecontext.Context) runenv.Overlay {
+	if ctx == nil {
+		return runenv.Overlay{}
+	}
+	return ctx.Environment
 }
 
 func resolveGitPath(workDir, value string) string {
@@ -323,6 +343,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.relabelEvalRun(context.Background(), plan.cfg, runID)
 		}()
 	})
+	executor.SetForgeContext(plan.forge)
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -347,9 +368,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
-				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
-			}
+			m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
 			// A recovered run is a finished run too. This is the second of the
 			// two completion boundaries, and leaving it out is what let a run
 			// resumed after a daemon restart keep its empty evidence directory
@@ -493,16 +512,13 @@ func (m *RunManager) broadcast(event ipc.Event) {
 // group the pipeline can name - only the worktree it is standing in still
 // identifies it (see internal/procreap).
 //
-// It runs before the worktree directory is removed, because a process that
-// outlives its worktree holds the deleted directory open through its cwd and
-// can no longer be attributed to any run. No age floor applies: the caller
-// owns this run and has already observed its execution return, so nothing
-// standing in it can still be legitimate work.
-func (m *RunManager) sweepRunWorktreeProcesses(wtDir string) {
-	procreap.SweepAndLog(procreap.Options{
-		WorktreesRoot: m.paths.WorktreesDir(),
-		Scope:         wtDir,
-	}, "run_cleanup")
+// The run's own worktree is what the sweep is pointed at, so a placement
+// outside the default tree needs no configuration lookup and cannot be hidden
+// by a worktree_roots edit made while the run was executing. The ordering rule
+// and its rationale live on procreap.SweepRunWorktree, which every removal site
+// in every package goes through.
+func (m *RunManager) sweepRunWorktreeProcesses(repoID, runID, wtDir string) {
+	procreap.SweepRunWorktree(m.paths.WorktreesDir(), repoID, runID, wtDir, "run_cleanup")
 }
 
 // cleanupRunEvidence tidies up after one finished run, then bounds the whole
@@ -537,6 +553,30 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 		slog.Debug("run evidence kept", "run_id", runID, "reason", err)
 	}
 	reapEvidence(m.db, root, policy, time.Now())
+}
+
+// removeRunWorktree sweeps processes before deciding whether to remove the
+// directory, so refusal retention cannot keep escaped workers alive.
+//
+// Every removal of a run worktree this package performs goes through here, and
+// none calls git.WorktreeRemove directly, because the ordering is easy to forget
+// at one site and invisible when forgotten - a run whose setup failed, whose
+// execution returned, or which was resumed after a crash all reach this point by
+// different routes. reason distinguishes the routes in the log.
+func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
+	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
+	run, err := m.db.GetRun(runID)
+	if err != nil {
+		slog.Warn("preserving run worktree: cannot read run", "run_id", runID, "error", err)
+		return
+	}
+	if refusal := protectedPathCleanupReason(m.db, run); refusal != "" {
+		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
+		return
+	}
+	if err := git.WorktreeRemove(context.Background(), gateDir, wtDir); err != nil {
+		slog.Warn("failed to remove run worktree", "reason", reason, "run_id", runID, "path", wtDir, "error", err)
+	}
 }
 
 // closeSubscribers soft-closes every subscriber for a run and marks the run
@@ -658,7 +698,8 @@ func assertGateTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, 
 }
 
 // HandlePushReceived processes a push notification from the post-receive hook.
-// It creates a run, sets up a worktree, and launches pipeline execution in the background.
+// A proof-mode push creates an unclaimed row: the first matching observer
+// receives the sole `created` disposition by atomically claiming it.
 func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
 	// Ref deletion (git push remote :branch) sends new SHA as all-zeros.
 	// Nothing to validate - skip pipeline.
@@ -670,7 +711,6 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	if err != nil {
 		return "", err
 	}
-
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -680,13 +720,233 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
+	if params.LaunchNonce != "" {
+		receipt, err := m.startFreshLaunch(ctx, repo, branch, params.New, params.Old, params.Gate, params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, "push")
+		if err != nil {
+			return "", err
+		}
+		return receipt.RunID, nil
+	}
+	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRBaseBranch)
 }
 
-// HandleRerun creates a new run for the latest gate head on a branch. An
-// explicit intent overrides the selected run. Otherwise an authoritative
-// intent is inherited byte-for-byte; runs without one infer intent afresh.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent string) (string, error) {
+// HandleStartFreshRun creates or replays a proof-mode launch only after
+// checking the creation context under the repository/branch lock.
+func (m *RunManager) HandleStartFreshRun(ctx context.Context, params *ipc.StartFreshRunParams) (ipc.LaunchReceipt, error) {
+	repo, err := m.db.GetRepo(params.RepoID)
+	if err != nil {
+		return ipc.LaunchReceipt{}, fmt.Errorf("get repo: %w", err)
+	}
+	if repo == nil {
+		return ipc.LaunchReceipt{}, fmt.Errorf("unknown repo %s", params.RepoID)
+	}
+	return m.startFreshLaunch(ctx, repo, params.Branch, params.HeadSHA, "", m.paths.RepoDir(repo.ID), params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, "fresh")
+}
+
+// startFreshLaunch owns proof identity under the branch lock. A nonce may
+// replay only its immutable submitted-head, generation, and persisted-intent
+// digest. It must never fall back to ordinary same-head reattachment.
+func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, gateDir string, skipSteps []types.StepName, intent, launchNonce, validationGeneration, prBaseBranch, trigger string) (ipc.LaunchReceipt, error) {
+	if err := validateLaunchNonce(launchNonce); err != nil {
+		return ipc.LaunchReceipt{}, err
+	}
+	if err := validateValidationGeneration(validationGeneration); err != nil {
+		return ipc.LaunchReceipt{}, err
+	}
+	storedPRBaseBranch, err := normalizeRunPRBaseBranch(prBaseBranch)
+	if err != nil {
+		return ipc.LaunchReceipt{}, err
+	}
+
+	if strings.TrimSpace(intent) == "" {
+		return ipc.LaunchReceipt{}, fmt.Errorf("intent is required with launch_nonce")
+	}
+	// Proof launches bind exactly the bytes persisted. Ordinary AXI intent
+	// retains its historical normalization.
+	persistedIntent := intent
+	requestDigest := digestIntent(persistedIntent)
+	var receipt ipc.LaunchReceipt
+	_, err = m.withBranchLock(repo.ID, branch, func() (string, error) {
+		existing, err := m.db.GetRunByLaunchNonce(repo.ID, branch, launchNonce)
+		if err != nil {
+			return "", err
+		}
+		if existing != nil {
+			if !launchPRBaseBranchMatches(existing, storedPRBaseBranch) {
+				return "", conflictingLaunchPRBaseBranch(launchNonce)
+			}
+
+			replayed, err := receiptForRun(existing, false)
+			if err != nil {
+				return "", err
+			}
+			// Submitted head is immutable proof provenance. Pipeline fixes and
+			// later gate pushes do not invalidate a same-nonce replay.
+			if replayed.ValidationGeneration != validationGeneration || replayed.SubmittedHeadSHA != headSHA || replayed.IntentDigest != requestDigest {
+				return "", fmt.Errorf("conflicting launch_nonce %q is already bound to a different validation generation, submitted head, or intent", launchNonce)
+			}
+			// Duplicate hook delivery is not observation: preserve an
+			// unclaimed push row for the first matching receipt observer.
+			if trigger == "push" {
+				receipt = replayed
+				return existing.ID, nil
+			}
+			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch)
+			if err != nil {
+				return "", err
+			}
+			if claimedRun == nil {
+				return "", fmt.Errorf("claimed launch receipt %q disappeared", launchNonce)
+			}
+			if !launchPRBaseBranchMatches(claimedRun, storedPRBaseBranch) {
+				return "", conflictingLaunchPRBaseBranch(launchNonce)
+			}
+
+			receipt, err = receiptForRun(claimedRun, claimed)
+			if err != nil {
+				return "", err
+			}
+			return existing.ID, nil
+		}
+
+		gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+		if err != nil {
+			return "", fmt.Errorf("resolve gate head: %w", err)
+		}
+		if gateHead != headSHA {
+			return "", fmt.Errorf("launch context drift: gate branch %q is at %s, not requested %s", branch, gateHead, headSHA)
+		}
+		inheritedPRURL := ""
+		if baseSHA == "" {
+			runs, err := m.db.GetRunsByRepoHead(repo.ID, branch, headSHA)
+			if err != nil {
+				return "", err
+			}
+			baseSHA = headSHA
+			if len(runs) > 0 {
+				baseSHA = runs[0].BaseSHA
+				inheritedPRURL = inheritablePRURL(runs[0])
+			}
+		}
+		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, inheritedPRURL)
+		if err != nil {
+			return "", err
+		}
+		run, err := m.db.GetRun(runID)
+		if err != nil {
+			return "", fmt.Errorf("read created run: %w", err)
+		}
+		if trigger == "push" {
+			receipt, err = receiptForRun(run, true)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch)
+			if err != nil {
+				return "", err
+			}
+			if claimedRun == nil {
+				return "", fmt.Errorf("claim newly created launch receipt")
+			}
+			if !launchPRBaseBranchMatches(claimedRun, storedPRBaseBranch) {
+				return "", conflictingLaunchPRBaseBranch(launchNonce)
+			}
+
+			receipt, err = receiptForRun(claimedRun, claimed)
+			if err != nil {
+				return "", err
+			}
+		}
+		return runID, nil
+	})
+	if err != nil {
+		return ipc.LaunchReceipt{}, err
+	}
+	return receipt, nil
+}
+
+func normalizeRunPRBaseBranch(prBaseBranch string) (string, error) {
+	normalized, err := steps.ValidateRunPRBaseBranchName(prBaseBranch)
+	if err != nil {
+		return "", fmt.Errorf("pr base branch: %w", err)
+	}
+	return normalized, nil
+}
+
+func launchPRBaseBranchMatches(run *db.Run, requested string) bool {
+	if requested == "" {
+		return true
+	}
+	return run != nil && run.PRBaseBranch != nil && strings.TrimSpace(*run.PRBaseBranch) == requested
+}
+
+func conflictingLaunchPRBaseBranch(launchNonce string) error {
+	return fmt.Errorf("conflicting launch_nonce %q is already bound to a different pr base branch", launchNonce)
+}
+
+func validateLaunchNonce(nonce string) error {
+	return validateLaunchValue("launch_nonce", nonce)
+}
+
+func validateValidationGeneration(generation string) error {
+	return validateLaunchValue("validation_generation", generation)
+}
+
+func validateLaunchValue(field, value string) error {
+	if len(value) == 0 || len(value) > 128 {
+		return fmt.Errorf("%s must be 1 to 128 ASCII URL-safe characters", field)
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || strings.ContainsRune("._~-", char) {
+			continue
+		}
+		return fmt.Errorf("%s contains unsupported character %q", field, char)
+	}
+	return nil
+}
+
+func digestIntent(intent string) string {
+	sum := sha256.Sum256([]byte(intent))
+	return fmt.Sprintf("%x", sum)
+}
+
+func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
+	if run == nil {
+		return ipc.LaunchReceipt{}, fmt.Errorf("run is required")
+	}
+	if run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA == "" {
+		return ipc.LaunchReceipt{}, fmt.Errorf("run %s has no submitted head binding", run.ID)
+	}
+	if run.LaunchNonce == nil || run.LaunchValidationGeneration == nil || run.LaunchIntentDigest == nil {
+		return ipc.LaunchReceipt{}, fmt.Errorf("run %s has no launch binding", run.ID)
+	}
+	disposition := "reused"
+	if created {
+		disposition = "created"
+	}
+	return ipc.LaunchReceipt{
+		RunID:                run.ID,
+		Disposition:          disposition,
+		LaunchNonce:          *run.LaunchNonce,
+		ValidationGeneration: *run.LaunchValidationGeneration,
+		Branch:               run.Branch,
+		HeadSHA:              *run.SubmittedHeadSHA,
+		SubmittedHeadSHA:     *run.SubmittedHeadSHA,
+		IntentDigest:         *run.LaunchIntentDigest,
+	}, nil
+}
+
+// HandleRerun creates a new run for the latest recoverable head on a branch:
+// normally the gate branch, or the latest terminal run's verified unpublished
+// head while custody remains outstanding. An explicit intent overrides the
+// selected run. Otherwise an authoritative intent is inherited byte-for-byte;
+// runs without one infer intent afresh. The selected run's PR URL is inherited
+// when that PR is not already merged or closed, so a later --base-branch
+// retarget can prove it is moving the same still-open review object.
+// A supplied clean caller head must match the selected head before any run
+// starts or is superseded. It never changes head selection.
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch, callerHeadSHA string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -696,7 +956,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	}
 
 	gateDir := m.paths.RepoDir(repo.ID)
-	headSHA, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
 	}
@@ -715,13 +975,20 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		if latestForBranch == nil {
 			latestForBranch = run
 		}
-		if run.HeadSHA == headSHA {
+		if run.HeadSHA == gateHead {
 			matchingHead = run
 			break
 		}
 	}
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
+	}
+	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
+	if err != nil {
+		return "", err
+	}
+	if callerHeadSHA != "" && callerHeadSHA != headSHA {
+		return "", fmt.Errorf("refusing rerun: selected head %s differs from clean local head %s; inspect `no-mistakes axi status` and reconcile custody before using `no-mistakes axi run` to submit the local head", headSHA, callerHeadSHA)
 	}
 	selectedRun := latestForBranch
 	if previousRunID != "" {
@@ -735,7 +1002,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	}
 
 	baseSHA := latestForBranch.BaseSHA
-	if matchingHead != nil {
+	if matchingHead != nil && headSHA == gateHead {
 		baseSHA = matchingHead.BaseSHA
 	}
 
@@ -752,7 +1019,66 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		}
 	}
 
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource)
+	storedPRBaseBranch := strings.TrimSpace(prBaseBranch)
+	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil {
+		storedPRBaseBranch = strings.TrimSpace(*selectedRun.PRBaseBranch)
+	}
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun))
+}
+
+func inheritablePRURL(run *db.Run) string {
+	if run.PRURL == nil {
+		return ""
+	}
+	state := ""
+	if run.PRState != nil {
+		state = strings.ToLower(strings.TrimSpace(*run.PRState))
+	}
+	if state == "merged" || state == "closed" {
+		return ""
+	}
+	return strings.TrimSpace(*run.PRURL)
+}
+
+func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
+	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve gate head: %w", err)
+	}
+	if latest == nil || !latest.Status.Terminal() || latest.CustodyReturnedAt != nil || latest.HeadSHA == gateHead {
+		return gateHead, nil
+	}
+	published := ""
+	if latest.LastPushedSHA != nil {
+		published = *latest.LastPushedSHA
+	} else if latest.SubmittedHeadSHA != nil {
+		published = *latest.SubmittedHeadSHA
+	}
+	if published == latest.HeadSHA || latest.TerminalHeadVerifiedAt == nil {
+		return gateHead, nil
+	}
+	recoveryRef := custody.RecoveryRef(latest.ID)
+	refTarget, refExists, refErr := git.ExactRefTarget(ctx, gateDir, recoveryRef)
+	if refErr != nil {
+		return "", fmt.Errorf("inspect terminal recovery ref for run %s: %w", latest.ID, refErr)
+	}
+	if refExists {
+		preserved, preserveErr := git.Run(ctx, gateDir, "rev-parse", recoveryRef+"^{commit}")
+		if preserveErr != nil {
+			return "", fmt.Errorf("refusing rerun: terminal recovery ref for run %s points at non-commit object %s; inspect with `no-mistakes axi status` and reconcile custody first", latest.ID, refTarget)
+		}
+		if preserved != latest.HeadSHA {
+			return "", fmt.Errorf("refusing rerun: terminal recovery ref for run %s points at %s, not recorded unpublished head %s; inspect with `no-mistakes axi status` and reconcile custody first", latest.ID, preserved, latest.HeadSHA)
+		}
+		return preserved, nil
+	}
+	if preserved, objectErr := git.Run(ctx, gateDir, "rev-parse", latest.HeadSHA+"^{commit}"); objectErr == nil && preserved == latest.HeadSHA {
+		if anchorErr := custody.PreserveRecoveryHead(ctx, gateDir, latest.ID, preserved); anchorErr != nil {
+			return "", fmt.Errorf("preserve terminal head %s before rerun: %w", preserved, anchorErr)
+		}
+		return preserved, nil
+	}
+	return "", fmt.Errorf("refusing rerun from stale gate head %s: terminal run %s recorded unpublished head %s, but that head is unavailable; inspect with `no-mistakes axi status` and reconcile custody first", gateHead, latest.ID, latest.HeadSHA)
 }
 
 // fetchRunDefaultBranch fetches the trusted branch from the refreshed
@@ -772,14 +1098,31 @@ func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) e
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string) (string, error) {
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent)
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prBaseBranch string) (string, error) {
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prBaseBranch, "")
 }
 
 // startRunWithIntentSource is the common run-creation path. source is empty
 // when no intent is supplied, RunIntentSourceAgent for a new explicit
 // override, and RunIntentSourceRerun for inherited explicit intent.
-func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source string) (string, error) {
+func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prBaseBranch, inheritedPRURL string) (string, error) {
+	return m.withBranchLock(repo.ID, branch, func() (string, error) {
+		return m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, source, "", "", "", prBaseBranch, inheritedPRURL)
+	})
+}
+
+func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+	lockKey := repoID + "/" + branch
+	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	branchMu := lockVal.(*sync.Mutex)
+	branchMu.Lock()
+	defer branchMu.Unlock()
+	return action()
+}
+
+// startRunWithIntentSourceLocked performs run creation while the caller owns
+// the repository/branch lock. Proof fields are empty for ordinary launches.
+func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -794,14 +1137,6 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
 	}
-
-	// Serialize per repo+branch to prevent two concurrent pushes from both
-	// passing cancelActiveRuns and creating duplicate pipelines.
-	lockKey := repo.ID + "/" + branch
-	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
-	branchMu := lockVal.(*sync.Mutex)
-	branchMu.Lock()
-	defer branchMu.Unlock()
 
 	// Best-effort only: a clone's remotes may change after init. Refresh the
 	// registered URLs before constructing any run-owned Git operation, but keep
@@ -818,7 +1153,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	m.cancelActiveRuns(repo.ID, branch)
 
 	storedIntent := intent
-	if source != db.RunIntentSourceRerun {
+	if source != db.RunIntentSourceRerun && launchNonce == "" {
 		storedIntent = strings.TrimSpace(storedIntent)
 	}
 	var runIntent *db.RunIntent
@@ -829,24 +1164,87 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Score: 1}
 	}
 
-	run, err := m.db.InsertRunWithIntent(repo.ID, branch, headSHA, baseSHA, runIntent)
+	storedPRBaseBranch, err := normalizeRunPRBaseBranch(prBaseBranch)
+	if err != nil {
+		trackStartFailure("invalid_pr_base_branch")
+		return "", err
+	}
+
+	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
+		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
+			m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
+			trackStartFailure("inherit_pr_url")
+			return "", fmt.Errorf("inherit PR URL: %w", err)
+		}
+		run.PRURL = &inherited
+	}
 
-	// Create worktree from the gate bare repo.
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
+		trackStartFailure("load_global_config")
+		return "", fmt.Errorf("load global config: %w", err)
+	}
+
+	// Create worktree from the gate bare repo, where this repository's
+	// worktree placement says it belongs (see internal/worktrees). This is the
+	// only point at which configuration decides placement: the resolved
+	// directory is recorded on the run before it exists on disk, and every
+	// later consumer reads that record back, so an edit to worktree_roots from
+	// here on is inert for this run.
 	gateDir := m.paths.RepoDir(repo.ID)
-	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
+	layout := worktrees.New(m.paths, globalCfg.WorktreeRoots)
+	checkouts, err := registeredCheckouts(m.db)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("list registered checkouts: %s", err))
+		trackStartFailure("list_registered_checkouts")
+		return "", fmt.Errorf("list registered checkouts: %w", err)
+	}
+	if err := layout.ValidateCheckout(repo.WorkingPath, checkouts...); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("worktree placement: %s", err))
+		trackStartFailure("invalid_worktree_placement")
+		return "", fmt.Errorf("worktree placement: %w", err)
+	}
+	wtDir := layout.Dir(repo.ID, repo.WorkingPath, run.ID)
+	if err := m.db.SetRunWorktreeDir(run.ID, wtDir); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("record worktree placement: %s", err))
+		trackStartFailure("record_worktree_placement")
+		return "", fmt.Errorf("record worktree placement: %w", err)
+	}
 	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
+
+	// The worktree exists from here on, so cleanup ownership is armed from here
+	// on: every later setup failure returns through this defer, and the
+	// background goroutine takes ownership only once it is running. Arming it any
+	// later would leave the directory behind - in the operator's own worktree
+	// root, unswept - for whichever failures happen in between.
+	bgOwnsWorktree := false
+	defer func() {
+		if !bgOwnsWorktree {
+			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_setup_failed")
+		}
+	}()
+
 	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
+	}
+	if storedPRBaseBranch != "" {
+		if err := steps.VerifyRemoteBranchExists(ctx, wtDir, storedPRBaseBranch); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("pr_base_branch_missing")
+			return "", err
+		}
 	}
 	// Fetch the trusted default branch and resolve it to an exact commit SHA
 	// before any read. Reading the trusted config at this pinned SHA (rather
@@ -869,23 +1267,6 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		}
 	}
 
-	// Track whether the background goroutine takes ownership of worktree cleanup.
-	// If setup fails before the goroutine launches, we must clean up here.
-	bgOwnsWorktree := false
-	defer func() {
-		if !bgOwnsWorktree {
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
-			}
-		}
-	}()
-
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
 	repoCfg, err := config.LoadRepo(wtDir)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
@@ -938,6 +1319,12 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			return "", err
 		}
 	}
+	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("resolve forge profile: %s", err))
+		trackStartFailure("resolve_forge_profile")
+		return "", fmt.Errorf("resolve forge profile: %w", err)
+	}
 
 	// Create agent. In demo mode, skip resolution and use a no-op agent.
 	var ag agent.Agent
@@ -958,6 +1345,8 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			next, agErr := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
 				DisableProjectSettings: cfg.DisableProjectSettings,
+				Profile:                cfg.AgentProfileFor(name),
+				Environment:            forgeEnvironment(forgeCtx),
 			})
 			if agErr != nil {
 				m.db.UpdateRunError(run.ID, fmt.Sprintf("create agent %s: %s", name, agErr))
@@ -997,6 +1386,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
@@ -1044,7 +1434,14 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 				}
 				addRunPerformanceSummary(m.db, run.ID, fields)
 				telemetry.Track("run", fields)
-				if dbErr := m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed); dbErr != nil {
+				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
+				var dbErr error
+				if verified {
+					dbErr = m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, types.RunFailed, verifiedHead)
+				} else {
+					dbErr = m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed)
+				}
+				if dbErr != nil {
 					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
 				}
 			}
@@ -1052,11 +1449,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			ag.Close()
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			m.sweepRunWorktreeProcesses(wtDir)
-			// Clean up worktree.
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
-			}
+			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
 			m.cleanupRunEvidence(cfg, run.ID)
 			// Remove tracking.
 			m.mu.Lock()

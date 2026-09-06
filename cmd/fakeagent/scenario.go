@@ -30,7 +30,7 @@ type Action struct {
 	Match string `yaml:"match"`
 
 	// Structured is the JSON body returned in the structured-output slot
-	// (claude.result.structured_output, opencode.info.structured, or the
+	// (claude/grok result.structured_output, opencode.info.structured, or the
 	// agent_message.text payload for codex). Encoded back to JSON when
 	// emitted, so YAML authors can write it inline without escaping.
 	Structured map[string]any `yaml:"structured,omitempty"`
@@ -89,8 +89,10 @@ func defaultScenario() *Scenario {
 				"summary":         "no issues found",
 				"risk_level":      "low",
 				"risk_rationale":  "no risks detected in the diff",
+				"risk_scope":      "source-or-external",
 				"tested":          []string{"fakeagent: simulated test run"},
 				"testing_summary": "simulated tests passed",
+				"artifacts":       []any{},
 				"title":           "feat: fakeagent change",
 				"body":            "## Summary\nfakeagent canned PR body",
 			},

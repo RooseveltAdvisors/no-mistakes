@@ -65,7 +65,7 @@ func TestInsertRunWithIntent(t *testing.T) {
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	intent := RunIntent{Summary: "  exact requirements\n", Source: RunIntentSourceRerun, Score: 1}
 
-	run, err := d.InsertRunWithIntent(repo.ID, "feature", "abc123", "def456", &intent)
+	run, err := d.InsertRunWithIntent(repo.ID, "feature", "abc123", "def456", &intent, "epic/feature")
 	if err != nil {
 		t.Fatalf("insert run with intent: %v", err)
 	}
@@ -78,6 +78,161 @@ func TestInsertRunWithIntent(t *testing.T) {
 	}
 	if got.IntentSource == nil || *got.IntentSource != intent.Source {
 		t.Fatalf("intent source = %v, want %q", got.IntentSource, intent.Source)
+	}
+	if got.PRBaseBranch == nil || *got.PRBaseBranch != "epic/feature" {
+		t.Fatalf("PRBaseBranch = %#v, want epic/feature", got.PRBaseBranch)
+	}
+}
+
+func TestLaunchNonceBindingClaimsOnceAndPreservesLegacyRows(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := d.InsertRun(repo.ID, "feature", "legacy-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.GetRun(legacy.ID); err != nil || got.LaunchNonce != nil || got.LaunchValidationGeneration != nil || got.LaunchIntentDigest != nil {
+		t.Fatalf("legacy launch binding = %#v, err = %v", got, err)
+	}
+	if claim, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "legacy-nonce", "legacy-head", "generation-1", "digest", ""); err != nil || claimed || claim != nil {
+		t.Fatalf("legacy receipt claim = %#v, claimed=%v, err=%v", claim, claimed, err)
+	}
+
+	const generation = "generation-001"
+	const intentDigest = "intent-digest"
+	intent := RunIntent{Summary: "exact persisted intent\n", Source: RunIntentSourceAgent, Score: 1}
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", &intent, "nonce-1", generation, intentDigest, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.LaunchNonce == nil || *run.LaunchNonce != "nonce-1" || run.LaunchValidationGeneration == nil || *run.LaunchValidationGeneration != generation || run.LaunchIntentDigest == nil || *run.LaunchIntentDigest != intentDigest {
+		t.Fatalf("launch binding = %#v", run)
+	}
+	if _, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", &intent, "nonce-1", generation, intentDigest, ""); err == nil {
+		t.Fatal("duplicate nonce insert succeeded")
+	}
+
+	conflicting, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-1", "head", "generation-002", intentDigest, "")
+	if err != nil || claimed || conflicting == nil || conflicting.ID != run.ID {
+		t.Fatalf("conflicting generation claim = %#v, claimed=%v, err=%v", conflicting, claimed, err)
+	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LaunchReceiptClaimedAt != nil {
+		t.Fatal("conflicting generation claim consumed created disposition")
+	}
+	first, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-1", "head", generation, intentDigest, "")
+	if err != nil || !claimed || first.ID != run.ID {
+		t.Fatalf("first claim = %#v, claimed=%v, err=%v", first, claimed, err)
+	}
+	replay, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-1", "head", generation, intentDigest, "")
+	if err != nil || claimed || replay.ID != run.ID {
+		t.Fatalf("replay claim = %#v, claimed=%v, err=%v", replay, claimed, err)
+	}
+}
+
+func TestClaimLaunchReceiptRejectsMismatchedPRBaseBranch(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := RunIntent{Summary: "exact persisted intent", Source: RunIntentSourceAgent, Score: 1}
+	const generation = "generation-base-001"
+	const intentDigest = "base-intent-digest"
+	const prBaseBranch = "release/v1"
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", &intent, "nonce-base", generation, intentDigest, prBaseBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conflicting, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-base", "head", generation, intentDigest, "other-target")
+	if err != nil || claimed || conflicting == nil || conflicting.ID != run.ID {
+		t.Fatalf("conflicting base claim = %#v, claimed=%v, err=%v", conflicting, claimed, err)
+	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LaunchReceiptClaimedAt != nil {
+		t.Fatal("conflicting base claim consumed created disposition")
+	}
+
+	first, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-base", "head", generation, intentDigest, " release/v1 ")
+	if err != nil || !claimed || first.ID != run.ID {
+		t.Fatalf("matching base claim = %#v, claimed=%v, err=%v", first, claimed, err)
+	}
+	if first.PRBaseBranch == nil || *first.PRBaseBranch != prBaseBranch {
+		t.Fatalf("claimed PR base branch = %#v, want %q", first.PRBaseBranch, prBaseBranch)
+	}
+	replay, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-base", "head", generation, intentDigest, "")
+	if err != nil || claimed || replay == nil || replay.ID != run.ID {
+		t.Fatalf("omitted base replay = %#v, claimed=%v, err=%v", replay, claimed, err)
+	}
+}
+
+func TestClaimLaunchReceiptAtomicallyReturnsCreatedOnce(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := RunIntent{Summary: "exact persisted intent", Source: RunIntentSourceAgent, Score: 1}
+	const generation = "generation-race-001"
+	const intentDigest = "race-intent-digest"
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", &intent, "nonce-race", generation, intentDigest, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 16
+	type result struct {
+		runID   string
+		claimed bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, callers)
+	for range callers {
+		go func() {
+			<-start
+			claimedRun, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-race", "head", generation, intentDigest, "")
+			runID := ""
+			if claimedRun != nil {
+				runID = claimedRun.ID
+			}
+			results <- result{runID: runID, claimed: claimed, err: err}
+		}()
+	}
+	close(start)
+
+	created := 0
+	for range callers {
+		got := <-results
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.runID != run.ID {
+			t.Fatalf("claim run ID = %q, want %q", got.runID, run.ID)
+		}
+		if got.claimed {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("created claims = %d, want 1", created)
+	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LaunchReceiptClaimedAt == nil {
+		t.Fatal("created claim was not persisted")
 	}
 }
 
@@ -190,6 +345,140 @@ func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	}
 	if got.AwaitingAgentSince != nil {
 		t.Errorf("AwaitingAgentSince = %d after recovery, want nil", *got.AwaitingAgentSince)
+	}
+}
+
+func TestRecoverStaleRunsMarksCIMonitorInterrupted(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	prURL := "https://github.com/user/project/pull/42"
+	if err := d.UpdateRunPRURL(run.ID, prURL); err != nil {
+		t.Fatalf("set pr url: %v", err)
+	}
+	ciStep, _ := d.InsertStepResult(run.ID, types.StepCI)
+	if err := d.StartStep(ciStep.ID); err != nil {
+		t.Fatalf("start ci step: %v", err)
+	}
+
+	count, err := d.RecoverStaleRuns("daemon crashed")
+	if err != nil {
+		t.Fatalf("recover stale runs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("recovered count = %d, want 1", count)
+	}
+
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Status != types.RunCIMonitorInterrupted {
+		t.Fatalf("run status = %q, want %q", got.Status, types.RunCIMonitorInterrupted)
+	}
+	if got.Error == nil || *got.Error != types.RunCIMonitorInterruptedReason {
+		t.Fatalf("run error = %v, want ci monitor interrupted message", got.Error)
+	}
+	if got.PRURL == nil || *got.PRURL != prURL {
+		t.Fatalf("PR URL = %v, want %q", got.PRURL, prURL)
+	}
+
+	step, err := d.GetStepResult(ciStep.ID)
+	if err != nil {
+		t.Fatalf("get ci step: %v", err)
+	}
+	if step.Status != types.StepStatusSkipped {
+		t.Fatalf("ci step status = %q, want %q", step.Status, types.StepStatusSkipped)
+	}
+}
+
+func TestRecoverStaleRunsCIWithoutPRURLFallsBackToFailed(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	ciStep, _ := d.InsertStepResult(run.ID, types.StepCI)
+	if err := d.StartStep(ciStep.ID); err != nil {
+		t.Fatalf("start ci step: %v", err)
+	}
+
+	count, err := d.RecoverStaleRuns("daemon crashed")
+	if err != nil {
+		t.Fatalf("recover stale runs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("recovered count = %d, want 1", count)
+	}
+
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Status != types.RunFailed {
+		t.Fatalf("run status = %q, want %q", got.Status, types.RunFailed)
+	}
+	if got.Error == nil || *got.Error != "daemon crashed" {
+		t.Fatalf("run error = %v, want daemon crashed", got.Error)
+	}
+
+	step, err := d.GetStepResult(ciStep.ID)
+	if err != nil {
+		t.Fatalf("get ci step: %v", err)
+	}
+	if step.Status != types.StepStatusFailed {
+		t.Fatalf("ci step status = %q, want %q", step.Status, types.StepStatusFailed)
+	}
+}
+
+func TestRecoverStaleRunsMixedCIAndNonCI(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+
+	ciRun, _ := d.InsertRun(repo.ID, "ci-feature", "abc", "def")
+	if err := d.UpdateRunStatus(ciRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark ci run running: %v", err)
+	}
+	if err := d.UpdateRunPRURL(ciRun.ID, "https://github.com/user/project/pull/42"); err != nil {
+		t.Fatalf("set pr url: %v", err)
+	}
+	ciStep, _ := d.InsertStepResult(ciRun.ID, types.StepCI)
+	if err := d.StartStep(ciStep.ID); err != nil {
+		t.Fatalf("start ci step: %v", err)
+	}
+
+	testRun, _ := d.InsertRun(repo.ID, "test-feature", "123", "456")
+	if err := d.UpdateRunStatus(testRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark test run running: %v", err)
+	}
+	testStep, _ := d.InsertStepResult(testRun.ID, types.StepTest)
+	if err := d.StartStep(testStep.ID); err != nil {
+		t.Fatalf("start test step: %v", err)
+	}
+
+	count, err := d.RecoverStaleRuns("daemon crashed")
+	if err != nil {
+		t.Fatalf("recover stale runs: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("recovered count = %d, want 2", count)
+	}
+
+	gotCI, _ := d.GetRun(ciRun.ID)
+	if gotCI.Status != types.RunCIMonitorInterrupted {
+		t.Fatalf("ci run status = %q, want %q", gotCI.Status, types.RunCIMonitorInterrupted)
+	}
+	gotTest, _ := d.GetRun(testRun.ID)
+	if gotTest.Status != types.RunFailed {
+		t.Fatalf("test run status = %q, want %q", gotTest.Status, types.RunFailed)
+	}
+	gotStep, _ := d.GetStepResult(testStep.ID)
+	if gotStep.Status != types.StepStatusFailed {
+		t.Fatalf("test step status = %q, want %q", gotStep.Status, types.StepStatusFailed)
 	}
 }
 
@@ -455,6 +744,47 @@ func TestRunPushBindingIsForwardOnlyAndLegacyRowsStayNullable(t *testing.T) {
 	}
 }
 
+func TestUpdateRunPublicationIsAtomic(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo-publication", "https://example.com/repo.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`CREATE TRIGGER reject_publication_head
+		BEFORE UPDATE OF head_sha ON runs
+		WHEN NEW.head_sha = 'repair'
+		BEGIN
+			SELECT RAISE(FAIL, 'injected publication failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	binding := PushBinding{HeadSHA: "repair", TargetKind: "upstream", TargetFingerprint: "digest", Ref: "refs/heads/feature"}
+	if err := d.UpdateRunPublication(run.ID, binding); err == nil {
+		t.Fatal("publication unexpectedly succeeded")
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != "submitted" || got.LastPushedSHA != nil || got.PushGeneration != nil {
+		t.Fatalf("failed publication partially changed run: %#v", got)
+	}
+	if _, err := d.sql.Exec(`DROP TRIGGER reject_publication_head`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunPublication(run.ID, binding); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != "repair" || got.LastPushedSHA == nil || *got.LastPushedSHA != "repair" || got.PushGeneration == nil || *got.PushGeneration != 1 {
+		t.Fatalf("publication was not recorded together: %#v", got)
+	}
+}
+
 func TestUpdateRunPRURL(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
@@ -662,6 +992,9 @@ func TestUpdateRunHeadSHA(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err := d.UpdateRunReviewApprovedHeadSHA(run.ID, "abc"); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := d.UpdateRunHeadSHA(run.ID, "xyz"); err != nil {
 		t.Fatalf("update head sha: %v", err)
@@ -669,6 +1002,26 @@ func TestUpdateRunHeadSHA(t *testing.T) {
 	got, _ := d.GetRun(run.ID)
 	if got.HeadSHA != "xyz" {
 		t.Errorf("head sha = %q, want %q", got.HeadSHA, "xyz")
+	}
+	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != "abc" {
+		t.Fatalf("ordinary head update cleared review authority: %#v", got.ReviewApprovedHeadSHA)
+	}
+}
+
+func TestUpdateRunHeadSHAForRevalidationClearsReviewAuthority(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err := d.UpdateRunReviewApprovedHeadSHA(run.ID, "abc"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.UpdateRunHeadSHAForRevalidation(run.ID, "xyz"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := d.GetRun(run.ID)
+	if got.HeadSHA != "xyz" || got.ReviewApprovedHeadSHA != nil {
+		t.Fatalf("revalidation head update = %#v, want head xyz without review authority", got)
 	}
 }
 
@@ -841,6 +1194,27 @@ func TestRecoverStaleRunsNoStaleRuns(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("recovered count = %d, want 0", count)
+	}
+}
+
+func TestSetRunsCustodyReturnedIsAtomic(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/stacked-custody", "git@github.com:user/stacked-custody.git", "main")
+	first, _ := d.InsertRun(repo.ID, "feat", "abc", "def")
+	second, _ := d.InsertRun(repo.ID, "feat", "ghi", "def")
+	_, err := d.sql.Exec(`CREATE TEMP TRIGGER fail_second_custody_stamp BEFORE UPDATE OF custody_returned_at ON runs WHEN OLD.id = '` + second.ID + `' BEGIN SELECT RAISE(ABORT, 'blocked'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.SetRunsCustodyReturned([]string{first.ID, second.ID}); err == nil {
+		t.Fatal("stacked custody stamp succeeded")
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		run, err := d.GetRun(id)
+		if err != nil || run == nil || run.CustodyReturnedAt != nil {
+			t.Fatalf("run %s custody = %#v, %v", id, run, err)
+		}
 	}
 }
 

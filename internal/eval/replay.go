@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
@@ -25,11 +26,17 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// ReplayOptions controls one isolated candidate comparison.
+// ReplayOptions controls one isolated candidate comparison. The optional
+// callbacks observe progress for interactive rendering: OnPlan fires once the
+// case set is reserved and the session is recorded, OnResult after each
+// replay's evaluation is persisted. Both run synchronously on the replay
+// goroutine and may be nil.
 type ReplayOptions struct {
 	Set       string
 	Candidate Candidate
 	Repeats   int
+	OnPlan    func(session Session, cases []Case)
+	OnResult  func(evaluation Evaluation, completed, total int)
 }
 
 // Session records the immutable local plan used for one replay batch.
@@ -50,8 +57,9 @@ const (
 
 // Replay runs exactly the captured review pass. It does not start a daemon or
 // use the production NM_HOME: every case is restored into a fresh temp gate and
-// worktree. Push, PR, CI, and all fix loops are intentionally absent from the
-// MVP subject under test.
+// worktree. Candidates inherit the caller's HOME so harness sign-in matches
+// an ordinary pipeline agent spawn. Push, PR, CI, and all fix loops are
+// intentionally absent from the MVP subject under test.
 func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []Evaluation, error) {
 	if store == nil {
 		return Session{}, nil, fmt.Errorf("eval replay requires a store")
@@ -59,7 +67,7 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 	if opts.Repeats <= 0 {
 		return Session{}, nil, fmt.Errorf("repeats must be at least 1")
 	}
-	if _, err := candidateModelArgs(opts.Candidate); err != nil {
+	if err := opts.Candidate.Validate(); err != nil {
 		return Session{}, nil, err
 	}
 	cases, session, err := store.prepareReplay(ctx, opts)
@@ -74,7 +82,11 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 		store.releaseReplayReservation(session.ID)
 	}()
 
-	evaluations := make([]Evaluation, 0, len(cases)*opts.Repeats)
+	if opts.OnPlan != nil {
+		opts.OnPlan(session, cases)
+	}
+	total := len(cases) * opts.Repeats
+	evaluations := make([]Evaluation, 0, total)
 	var failed int
 	for repeat := 1; repeat <= opts.Repeats; repeat++ {
 		for _, c := range cases {
@@ -86,6 +98,9 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 				return session, evaluations, err
 			}
 			evaluations = append(evaluations, evaluation)
+			if opts.OnResult != nil {
+				opts.OnResult(evaluation, len(evaluations), total)
+			}
 		}
 	}
 	if failed > 0 {
@@ -216,12 +231,6 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		evaluation.CompletedAt = time.Now().Unix()
 		return evaluation
 	}
-	isolatedHome := filepath.Join(root, "home")
-	if err := os.MkdirAll(isolatedHome, 0o755); err != nil {
-		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create isolated eval home: %v", err))
-		evaluation.CompletedAt = time.Now().Unix()
-		return evaluation
-	}
 	ownership, err := e2edaemon.Acquire(isolatedPaths.Root(), "", 2*time.Minute)
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(fmt.Sprintf("acquire isolated eval ownership: %v", err))
@@ -245,15 +254,15 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	cfg.Agent = candidate.Agent
 	cfg.Agents = []types.AgentName{candidate.Agent}
 
-	modelArgs, err := candidateModelArgs(candidate)
-	if err != nil {
-		evaluation.Error = safeurl.RedactText(err.Error())
-		evaluation.CompletedAt = time.Now().Unix()
-		return evaluation
-	}
-	baseAgent, err := agent.NewWithOptions(candidate.Agent, cfg.AgentPathFor(candidate.Agent), modelArgs, agent.Options{
+	// The candidate's tuning goes through the same harness-neutral Profile the
+	// pipeline uses, so eval and a real run reach each harness's model and
+	// effort mechanism by exactly one code path. Raw args stay empty: capture
+	// strips agent_args_override and agent_config from the pinned config so a
+	// replay cannot inherit the capturing machine's own pins.
+	baseAgent, err := agent.NewWithOptions(candidate.Agent, cfg.AgentPathFor(candidate.Agent), nil, agent.Options{
 		ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
 		DisableProjectSettings: cfg.DisableProjectSettings,
+		Profile:                candidate.Profile(),
 	})
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create candidate agent: %v", err))
@@ -303,12 +312,17 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		SkipFixExecution:      fixing,
 		ReviewStartingHeadSHA: startingHeadSHA,
 		PreviousFindings:      previousFindings,
-		Env:                   []string{"NM_HOME=" + isolatedPaths.Root(), "HOME=" + isolatedHome},
-		Log:                   func(string) {},
-		LogChunk:              func(string) {},
-		LogFile:               func(string) {},
-		UserIntent:            c.Intent,
-		IntentSource:          c.IntentSource,
+		// Keep NM_HOME on the nested sandbox so replay cannot see or mutate
+		// production pipeline/eval state. Do not rewrite HOME: candidates use
+		// the same harness sign-in and user settings as an ordinary pipeline
+		// agent spawn. That is not a security sandbox; a candidate may still
+		// read and write ordinary HOME-relative agent files.
+		Env:          []string{"NM_HOME=" + isolatedPaths.Root()},
+		Log:          func(string) {},
+		LogChunk:     func(string) {},
+		LogFile:      func(string) {},
+		UserIntent:   c.Intent,
+		IntentSource: c.IntentSource,
 	})
 	// Candidate wall time is the actual review invocation, matching the local
 	// agent-invocation metric rather than charging case restoration setup.
@@ -321,7 +335,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		evaluation.Model = observed.result.Model
 		if evaluation.Model == "" {
 			evaluation.Model = candidate.Model
-		} else if evaluation.Model != candidate.Model {
+		} else if !agentcfg.ServedMatchesRequested(candidate.Model, evaluation.Model, observed.result.ModelProvider) {
 			evaluation.Error = safeurl.RedactText(fmt.Sprintf("candidate served model %q, requested %q", evaluation.Model, candidate.Model))
 			return evaluation
 		}
@@ -466,16 +480,6 @@ func replayConfig(c Case) (*config.Config, error) {
 	return config.Merge(global, repo), nil
 }
 
-func candidateModelArgs(candidate Candidate) ([]string, error) {
-	if _, ok := types.ACPTargetFor(candidate.Agent); ok {
-		return nil, fmt.Errorf("candidate agent %q cannot enforce an explicit model", candidate.Agent)
-	}
-	if candidate.Agent == types.AgentCodex {
-		return []string{"-m", candidate.Model}, nil
-	}
-	return []string{"--model", candidate.Model}, nil
-}
-
 type observedAgent struct {
 	inner        agent.Agent
 	ownership    *e2edaemon.Ownership
@@ -550,26 +554,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		evaluation.InputTokens, evaluation.OutputTokens, evaluation.FreshInputTokens, evaluation.DurationMS, path)
 	if err != nil {
 		return fmt.Errorf("record eval result: %w", err)
-	}
-	if evaluation.Status == "completed" && evaluation.Pending > 0 {
-		if err := incrementQueuedFindings(c.Dir, evaluation.Pending); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func incrementQueuedFindings(caseDir string, count int) error {
-	if count <= 0 {
-		return nil
-	}
-	var labels Labels
-	if err := readJSON(filepath.Join(caseDir, "labels.json"), &labels); err != nil {
-		return fmt.Errorf("read local labels queue: %w", err)
-	}
-	labels.QueuedCandidateFindings += count
-	if err := writeJSON(filepath.Join(caseDir, "labels.json"), labels); err != nil {
-		return fmt.Errorf("update local labels queue: %w", err)
 	}
 	return nil
 }

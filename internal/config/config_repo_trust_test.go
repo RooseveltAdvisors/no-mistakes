@@ -175,6 +175,49 @@ func TestEffectiveRepoConfig_NilPushedSafeDefaults(t *testing.T) {
 	}
 }
 
+func TestEffectiveRepoConfig_ProvidersUsePushedValues(t *testing.T) {
+	truthy := true
+	falsy := false
+	for _, tc := range []struct {
+		name    string
+		pushed  *bool
+		trusted *bool
+	}{
+		{name: "enabled", pushed: &truthy, trusted: &falsy},
+		{name: "disabled", pushed: &falsy, trusted: &truthy},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pushed := &RepoConfig{Providers: ProvidersRaw{
+				GitHub:      GitHubProviderRaw{DraftPullRequests: tc.pushed},
+				GitLab:      GitLabProviderRaw{DraftPullRequests: tc.pushed},
+				Bitbucket:   BitbucketProviderRaw{DraftPullRequests: tc.pushed},
+				AzureDevOps: AzureDevOpsProviderRaw{DraftPullRequests: tc.pushed},
+			}}
+			trusted := &RepoConfig{Providers: ProvidersRaw{
+				GitHub:      GitHubProviderRaw{DraftPullRequests: tc.trusted},
+				GitLab:      GitLabProviderRaw{DraftPullRequests: tc.trusted},
+				Bitbucket:   BitbucketProviderRaw{DraftPullRequests: tc.trusted},
+				AzureDevOps: AzureDevOpsProviderRaw{DraftPullRequests: tc.trusted},
+			}}
+
+			for _, allowRepoCommands := range []bool{false, true} {
+				got := EffectiveRepoConfig(pushed, trusted, allowRepoCommands)
+				providers := map[string]*bool{
+					"github":      got.Providers.GitHub.DraftPullRequests,
+					"gitlab":      got.Providers.GitLab.DraftPullRequests,
+					"bitbucket":   got.Providers.Bitbucket.DraftPullRequests,
+					"azuredevops": got.Providers.AzureDevOps.DraftPullRequests,
+				}
+				for provider, draft := range providers {
+					if draft == nil || *draft != *tc.pushed {
+						t.Errorf("allowRepoCommands=%v: providers.%s.draft_pull_requests = %v, want pushed %v", allowRepoCommands, provider, draft, *tc.pushed)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestLoadRepo_AllowRepoCommands proves the per-repo opt-in is read from the
 // repo config (the trusted default-branch copy), replacing the former coarse
 // global flag. It defaults false.
@@ -261,6 +304,85 @@ func TestEffectiveRepoConfig_DocumentPolicyTrustedOnly(t *testing.T) {
 	effective = EffectiveRepoConfig(pushed, trusted, true)
 	if effective.Document.Instructions != "docs/owners.md maps every fact to its owner" {
 		t.Fatalf("Document.Instructions = %q, want trusted copy under opt-in", effective.Document.Instructions)
+	}
+}
+
+func TestEffectiveRepoConfig_PRBaseBranchTrustedOnly(t *testing.T) {
+	pushed := &RepoConfig{PR: PRRaw{BaseBranch: "feature-selected"}}
+	trusted := &RepoConfig{PR: PRRaw{BaseBranch: "develop"}}
+
+	got := EffectiveRepoConfig(pushed, trusted, false)
+	if got.PR.BaseBranch != "develop" {
+		t.Fatalf("PR.BaseBranch = %q, want trusted branch", got.PR.BaseBranch)
+	}
+
+	got = EffectiveRepoConfig(pushed, &RepoConfig{}, false)
+	if got.PR.BaseBranch != "" {
+		t.Fatalf("PR.BaseBranch = %q, want empty trusted fallback", got.PR.BaseBranch)
+	}
+
+	got = EffectiveRepoConfig(pushed, trusted, true)
+	if got.PR.BaseBranch != "feature-selected" {
+		t.Fatalf("PR.BaseBranch = %q, want pushed branch under explicit opt-in", got.PR.BaseBranch)
+	}
+}
+
+func TestEffectiveRepoConfig_PRBaseBranchOptInUsesPushedValue(t *testing.T) {
+	pushed := &RepoConfig{PR: PRRaw{BaseBranch: "develop"}}
+	trusted := &RepoConfig{AllowRepoCommands: true}
+
+	got := EffectiveRepoConfig(pushed, trusted, trusted.AllowRepoCommands)
+	if got.PR.BaseBranch != "develop" {
+		t.Fatalf("PR.BaseBranch = %q, want pushed branch under explicit opt-in", got.PR.BaseBranch)
+	}
+}
+
+func TestLoadRepoConfig_PRBaseBranch(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte("pr:\n  base_branch: develop\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.PR.BaseBranch != "develop" {
+		t.Fatalf("PR.BaseBranch = %q, want develop", cfg.PR.BaseBranch)
+	}
+}
+
+// TestEffectiveRepoConfig_PRBaseBranchOptInWithNoTrustedCopyUsesPushedValue
+// proves the allow_repo_commands opt-in honors a pushed pr.base_branch even
+// when no trusted default-branch copy is present at all, matching the
+// existing Commands/Agent contract for the identical combination (see
+// TestEffectiveRepoConfig_NoTrustedOptInStillHonorsPushed).
+func TestEffectiveRepoConfig_PRBaseBranchOptInWithNoTrustedCopyUsesPushedValue(t *testing.T) {
+	pushed := &RepoConfig{PR: PRRaw{BaseBranch: "develop"}}
+
+	got := EffectiveRepoConfig(pushed, nil, true)
+	if got.PR.BaseBranch != "develop" {
+		t.Fatalf("PR.BaseBranch = %q, want pushed branch under explicit opt-in with no trusted copy", got.PR.BaseBranch)
+	}
+
+	got = EffectiveRepoConfig(pushed, nil, false)
+	if got.PR.BaseBranch != "" {
+		t.Fatalf("PR.BaseBranch = %q, want empty without opt-in and no trusted copy", got.PR.BaseBranch)
+	}
+}
+
+func TestLoadRepoConfig_PRBaseBranchRejectsInvalidBranchName(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("pr:\n  base_branch: \"bad..branch\"\n"))
+	if err == nil {
+		t.Fatal("expected error for invalid pr.base_branch, got nil")
+	}
+	if !strings.Contains(err.Error(), "pr.base_branch") {
+		t.Fatalf("error = %v, want it to name pr.base_branch", err)
+	}
+}
+
+func TestLoadRepoConfig_PRBaseBranchEmptyIsValid(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte("pr:\n  base_branch: \"\"\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.PR.BaseBranch != "" {
+		t.Fatalf("PR.BaseBranch = %q, want empty", cfg.PR.BaseBranch)
 	}
 }
 

@@ -42,15 +42,18 @@ func axiScenario(t *testing.T) string {
       summary: "found 1 issue"
       risk_level: medium
       risk_rationale: "warning requires human review"
+      risk_scope: source-or-external
   - text: "no issues found"
     structured:
       findings: []
       summary: "no issues found"
       risk_level: low
       risk_rationale: "no risks detected in the diff"
+      risk_scope: source-or-external
       tested:
         - "fakeagent: simulated test run"
       testing_summary: "simulated tests passed"
+      artifacts: []
       title: "feat: fakeagent change"
       body: "## Summary\nfakeagent canned PR body"
 `
@@ -92,14 +95,17 @@ func branchSyncScenario(t *testing.T) string {
       summary: "found one issue"
       risk_level: medium
       risk_rationale: "the unsafe value needs a guard"
+      risk_scope: source-or-external
   - text: "no issues found"
     structured:
       findings: []
       summary: "no issues found"
       risk_level: low
       risk_rationale: "no remaining risk"
+      risk_scope: source-or-external
       tested: ["fakeagent: focused verification"]
       testing_summary: "simulated tests passed"
+      artifacts: []
       title: "feat: branch sync"
       body: "branch sync journey"
 `
@@ -427,6 +433,7 @@ func TestAxiCustodyRecoveryJourney(t *testing.T) {
 			t.Errorf("stranded check missing %q:\n%s", want, checkOut)
 		}
 	}
+	t.Logf("end-user custody dead-end report:\n%s", checkOut)
 
 	recoverOut, err := h.RunInDir(operator, "axi", "sync", "--recover")
 	if err != nil {
@@ -437,6 +444,7 @@ func TestAxiCustodyRecoveryJourney(t *testing.T) {
 			t.Errorf("recover output missing %q:\n%s", want, recoverOut)
 		}
 	}
+	t.Logf("end-user guarded recovery result:\n%s", recoverOut)
 	if got, gitErr := h.runGit(context.Background(), operator, "rev-parse", "HEAD"); gitErr != nil || strings.TrimSpace(string(got)) != preserved {
 		t.Fatalf("operator HEAD after recovery = %s (err %v), want preserved %s", strings.TrimSpace(string(got)), gitErr, preserved)
 	}
@@ -467,6 +475,7 @@ func TestAxiCustodyRecoveryJourney(t *testing.T) {
 	if !strings.Contains(freshOut, "gate:") {
 		t.Fatalf("fresh pipeline did not start cleanly after recovery:\n%s", freshOut)
 	}
+	t.Logf("end-user fresh-run result after custody return:\n%s", freshOut)
 }
 
 // rebaseCustodyScenario differs from branchSyncScenario in exactly one way that
@@ -498,14 +507,17 @@ func rebaseCustodyScenario(t *testing.T) string {
       summary: "found one issue"
       risk_level: medium
       risk_rationale: "the feature needs a guard"
+      risk_scope: source-or-external
   - text: "no issues found"
     structured:
       findings: []
       summary: "no issues found"
       risk_level: low
       risk_rationale: "no remaining risk"
+      risk_scope: source-or-external
       tested: ["fakeagent: focused verification"]
       testing_summary: "simulated tests passed"
+      artifacts: []
       title: "feat: rebase custody"
       body: "rebase custody journey"
 `
@@ -981,7 +993,7 @@ func TestAxiRunReportsImmediateAgentlessFailureWithoutRerun(t *testing.T) {
 		t.Fatalf("nm init: %v\n%s", err, out)
 	}
 
-	for _, name := range []string{"claude", "codex", "opencode"} {
+	for _, name := range []string{"claude", "codex", "grok", "opencode"} {
 		if err := os.Remove(filepath.Join(h.BinDir, name)); err != nil {
 			t.Fatalf("remove fake %s agent: %v", name, err)
 		}
