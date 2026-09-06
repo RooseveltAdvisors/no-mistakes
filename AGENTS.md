@@ -74,7 +74,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 **Telemetry**
 
-- Read surfaces: no pageview; `ReadSurfaceGate` on fingerprint. Perf local-only (`agent_invocations`); remote terminal run event counts only. `internal/agent/invocationmetrics.go` owns fidelity fields.
+- Read-only surfaces (`axi` home/status/logs, `status`, `runs`): NO remote telemetry; never reintroduce `trackCommand`/`trackAxiSurface`/`ReadSurfaceGate` there. Perf local-only (`agent_invocations`); remote terminal run event counts only. `internal/agent/invocationmetrics.go` owns fidelity fields.
 
 ## Maintaining this file
 
