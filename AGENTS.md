@@ -55,6 +55,10 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 - `verify.py` reads PR body/head SHA via live REST lookup (`live_pr_facts`) before `GITHUB_EVENT_PATH` when no explicit inputs; reruns replay stale archived events. Tests: `require_no_mistakes_action_test.go`.
 
+**Pre-Push Pipeline Attestation**
+
+- `publishRunHead` must write an existing GitHub PR attestation for the proposed head before pushing it. The protocol has single-publisher scope because the daemon enforces one active run per repository branch; do not add cross-publisher coordination without a separate requirement. Detailed behavior is owned by `docs/src/content/docs/reference/pipeline-steps.md`; local rationale lives in `attestHeadBeforePush` and `publishRunHead`. Regressions: `TestPushStep_AttestsHeadBeforePush`, `TestPushStep_AttestationWriteFailureAbortsBeforePush`, `TestPushStep_UnavailableSCMLeavesStaleAttestationFailingClosed`, `TestPushStep_PushFailureAfterAttestationLeavesBodyAhead`, and `TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes`.
+
 **Custody Recovery (`internal/branchsync`)**
 
 - Missing-head keep-local (#958): `missingHeadKeepLocalRuns` checked first; verified head absent from worktree+gate with compatible recovery refs offers `recover_custody` via `--recover --keep-local` (explicit discard); plain `--recover` refuses.
