@@ -1166,7 +1166,7 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 	hasRoundParseFailure := roundsHaveParseFailure(rounds)
 	hadAnyFindings := hadFindings || hasFinalFindings || hasAnyRoundFindings
 	hasUnreadableFinalFindings := sr.FindingsJSON != nil && !finalFindingsParsed
-	wasFixed := hadFindings && len(rounds) > 1 && !hasUnreadableFinalFindings && !hasFinalFindings
+	findingsCleared := hadFindings && len(rounds) > 1 && !hasUnreadableFinalFindings && !hasFinalFindings
 	riskLevel := ""
 	if sr.StepName == types.StepReview {
 		src := finalFindings
@@ -1198,7 +1198,7 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
 	}
 
-	if wasFixed {
+	if findingsCleared {
 		result := buildFixResultText(rounds)
 		line := fmt.Sprintf("🔧 **%s** - %s ✅", name, result)
 		return buildDetail(line)
@@ -1317,11 +1317,18 @@ func buildFixResultText(rounds []*db.StepRound) string {
 		}
 	}
 
-	// Categorize fix rounds. Legacy "user_fix" rounds are rendered as auto-fix.
-	autoFixRounds := 0
+	var autoFixRounds, noChangeRounds, unreportedRounds int
 	for _, r := range rounds[1:] {
-		if r.IsFixRound() {
+		if !r.IsFixRound() {
+			continue
+		}
+		switch fixRoundOutcome(r) {
+		case fixOutcomeNoChange:
+			noChangeRounds++
+		case fixOutcomeApplied:
 			autoFixRounds++
+		case fixOutcomeUnreported:
+			unreportedRounds++
 		}
 	}
 
@@ -1332,10 +1339,19 @@ func buildFixResultText(rounds []*db.StepRound) string {
 
 	parts := []string{fmt.Sprintf("%d %s found", initialCount, noun)}
 
-	if autoFixRounds > 1 {
-		parts = append(parts, fmt.Sprintf("auto-fixed (%d)", autoFixRounds))
-	} else if autoFixRounds == 1 {
-		parts = append(parts, "auto-fixed")
+	for _, result := range []struct {
+		count int
+		text  string
+	}{
+		{autoFixRounds, "auto-fixed"},
+		{noChangeRounds, "no changes applied"},
+		{unreportedRounds, "fix attempted; result not reported"},
+	} {
+		if result.count == 1 {
+			parts = append(parts, result.text)
+		} else if result.count > 1 {
+			parts = append(parts, fmt.Sprintf("%s (%d)", result.text, result.count))
+		}
 	}
 
 	return strings.Join(parts, " → ")
@@ -1344,9 +1360,8 @@ func buildFixResultText(rounds []*db.StepRound) string {
 // buildStepDetails renders the collapsible body for a step as an
 // issue -> fix -> outcome narrative rather than a round-by-round log. Each
 // round is shown as the review state observed at its end; a fix round is
-// prefixed with the fix the agent applied (its commit summary) so a reader can
-// see what was wrong and what was done about it without mentally replaying
-// "rounds".
+// prefixed with its recorded outcome so a reader can follow the result without
+// mentally replaying rounds.
 func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor) string {
 	var inner strings.Builder
 	if len(rounds) == 0 {
@@ -1361,7 +1376,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	for _, r := range rounds {
 		isFixRound := r.IsFixRound()
 		if isFixRound {
-			inner.WriteString(fixRoundLine(r, flavor))
+			inner.WriteString(fixRoundLine(r))
 			inner.WriteString("\n")
 		}
 
@@ -1439,17 +1454,38 @@ func isTautologicalStepInner(inner string) bool {
 	}
 }
 
-// fixRoundLine renders the one-line summary of the fix the agent applied in a
-// fix round, falling back to a generic note when no summary was captured.
-func fixRoundLine(r *db.StepRound, flavor prBodyFlavor) string {
-	summary := ""
-	if r.FixSummary != nil {
-		summary = strings.TrimSpace(*r.FixSummary)
+type fixOutcome uint8
+
+const (
+	fixOutcomeUnreported fixOutcome = iota
+	fixOutcomeNoChange
+	fixOutcomeApplied
+)
+
+func fixRoundOutcome(r *db.StepRound) fixOutcome {
+	if r.FixSummary == nil || strings.TrimSpace(*r.FixSummary) == "" {
+		return fixOutcomeUnreported
 	}
-	if summary == "" {
+	switch strings.TrimSpace(*r.FixSummary) {
+	case noChangesAppliedSummary:
+		return fixOutcomeNoChange
+	case changesAppliedSummary:
+		return fixOutcomeApplied
+	default:
+		return fixOutcomeUnreported
+	}
+}
+
+// fixRoundLine renders the one-line result of a fix round.
+func fixRoundLine(r *db.StepRound) string {
+	switch fixRoundOutcome(r) {
+	case fixOutcomeNoChange:
+		return "🔧 No changes applied."
+	case fixOutcomeApplied:
 		return "🔧 Fix applied."
+	default:
+		return "🔧 Fix attempted; result not reported."
 	}
-	return fmt.Sprintf("🔧 Fix: %s", escapePRText(summary, flavor))
 }
 
 // writeFindingItems renders each finding as a `file:line - description` bullet,
