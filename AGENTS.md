@@ -35,10 +35,19 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - That fallback is a second attempt in a fresh session too, and a `session.error` can arrive at any point in a turn, so it carries the same gate: `thinkingConflict` annotates the trigger with `errOpencodeToolsAlreadyRan` when the turn ran a tool and `runOnce` then reports the conflict instead of falling back. Regression: `TestOpencodeAgent_ThinkingConflictAfterToolActivityDoesNotFallBack`.
 - `opencodeMessageError.rawData` keeps the verbatim `data` payload beside the typed `Data`, because thinking/tool_choice detection scans the payload as text (`providerText`) and a decode into the typed struct drops every provider-specific extra it has no field for.
 
+**Live-Validation Contract (Test step)**
+
+- The Test step's evidence turn returns `scenarios` (name, result pass/fail/untested, `live`, evidence, reason) plus a `verdict` (go/no-go/inconclusive); both are REQUIRED by `testFindingsSchema` and validated in `unmarshalRequiredTestFindings`. `live: true` means driven against the real running product in that run - a unit test, stub, or fixture is not live.
+- Verdict policy (captain's call C2 = a) lives in `verdictFindings` (`internal/pipeline/steps/test.go`): `no-go` parks as an auto-fixable error, `inconclusive` parks as an ask-user warning, a `fail` scenario with any other verdict is rejected as a contract violation, and `untested` NEVER parks - it is listed on the PR so reporting it honestly stays cheaper than guessing a pass. Do not make untested blocking.
+- Rendering is owned by `internal/pipeline/steps/prsummary_scenarios.go` (Testing section, Pipeline fold, and attestation `live_validation: {verdict, live, total}`). The attestation omits `live_validation` whenever the current head differs from the head Test validated. Pre-contract runs parse and render exactly as before.
+- The evidence turn is unconditional: a green `commands.test` baseline is never enough on its own, so the step always drives scenarios afterwards. The step deliberately owns no capability inventory, scratch lab, or environment exports - the agent discovers what the machine can do for itself.
+- `test.instructions` is the repository's live-validation runbook. It is trusted-default-branch-only, exactly like `document.instructions` and for the same reason (it steers the gate that validates the pushed branch), and is resolved from the repository only - never from global config, which has no repository to describe.
+- Regressions: `TestTestStep_PromptDerivesScenariosAndMarksLive`, `TestTestStep_VerdictPolicy`, `TestTestStep_MissingScenarioContractFails` (`internal/pipeline/steps/test_scenario_contract_test.go`), `internal/pipeline/steps/prsummary_scenarios_test.go`, `require_no_mistakes_live_validation_test.go`, `TestEffectiveRepoConfig_TestInstructionsTrustedOnly`.
+
 **Repo Config Trust Boundary (security)**
 
 - `commands.{test,lint,format}` and `agent` from trusted default branch pinned SHA, never pushed SHA (`loadTrustedRepoConfig`, `assertGateTrustedConfigReadable`).
-- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, the whole `ci` block. `allow_repo_commands` default false on trusted branch only.
+- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, the whole `ci` block, `test.instructions`. `allow_repo_commands` default false on trusted branch only.
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
 - `pr.base_branch` trusted-only but honors `allow_repo_commands` opt-in; existing PR forge base (`scm.PRBaseBranchReader`) wins for CI repair/tip monitoring; PR lookup by branch only. Semantics: `repo-config.md`.
