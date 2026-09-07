@@ -6,6 +6,10 @@ Go CLI `no-mistakes`; entry `cmd/no-mistakes`; layout map: `internal/cli`, `inte
 
 After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e behind `e2e` tag); `make e2e` when touching agents/e2e/fixtures; `go build -o ./bin/no-mistakes ./cmd/no-mistakes`.
 
+**Self-update channel manifest (`internal/update`)**
+
+- `no-mistakes update` reads version metadata exclusively from `channels.json` on the GitHub release-asset CDN (`releases/download/channels/channels.json`), not `api.github.com`; a token is never required. Publisher: `cmd/publish-channels`, invoked from `.github/workflows/publish-channels.yml`. Regressions: `internal/update/channels_test.go`.
+
 **GitLab Backend (`internal/scm/gitlab`)**
 
 - `glab v1.5x` drift traps in `gitlab.go` comments (host-scoped auth, no `--state opened`, no `--yes` on `mr update`, jobs via API).
