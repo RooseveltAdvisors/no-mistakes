@@ -93,10 +93,11 @@ const (
 // prompt instructs the agent to use for each derived scenario.
 //
 // ScenarioResultUntested is the honest answer for a scenario this machine
-// could not drive against the real product - a missing tool, credential,
-// permission, or authority. It is reported on the pull request and never
-// blocks by itself; only the run's verdict parks the step (see
-// TestVerdictNoGo).
+// could not drive against the real product - either the change has no live
+// product surface, or a required tool, credential, permission, or authority
+// is unavailable. It is reported on the pull request and never blocks by
+// itself; the run's verdict determines whether that scenario coverage parks
+// the step.
 const (
 	ScenarioResultPass     = "pass"
 	ScenarioResultFail     = "fail"
@@ -105,15 +106,25 @@ const (
 
 // Test verdict constants: the test step's own conclusion about whether the
 // change is safe to ship, independent of individual findings.
+//
+// TestVerdictNoSurface is the honest answer when the change itself has no
+// runtime product no-mistakes can drive live - a CI-workflow-only change, a
+// docs-only change, a pure non-runtime refactor, or anything else with no
+// live-exercisable scenario. It is not a silent skip: the Test step parks
+// for a human to decide whether proceeding without live validation is
+// acceptable. A change that has a live surface and was not driven still
+// uses pass/fail/untested plus go/no-go/inconclusive; claiming no-surface
+// while any scenario is live or pass/fail is a contract violation.
 const (
 	TestVerdictGo           = "go"
 	TestVerdictNoGo         = "no-go"
 	TestVerdictInconclusive = "inconclusive"
+	TestVerdictNoSurface    = "no-surface"
 )
 
 var (
 	knownScenarioResults = []string{ScenarioResultPass, ScenarioResultFail, ScenarioResultUntested}
-	knownTestVerdicts    = []string{TestVerdictGo, TestVerdictNoGo, TestVerdictInconclusive}
+	knownTestVerdicts    = []string{TestVerdictGo, TestVerdictNoGo, TestVerdictInconclusive, TestVerdictNoSurface}
 )
 
 // IsKnownScenarioResult reports whether result is part of the scenario result
@@ -157,8 +168,9 @@ type Finding struct {
 // Live is the whole point of the record: it is true ONLY when the scenario was
 // driven against the real product in this run. A unit test, a stub, a recorded
 // fixture, or reading the code is not live, and a scenario that could not be
-// driven here is reported with Result ScenarioResultUntested plus the Reason
-// that stopped it rather than being guessed at.
+// driven here is reported with Result ScenarioResultUntested plus a Reason
+// explaining the unavailable capability or absence of a live product surface,
+// rather than being guessed at.
 type TestScenario struct {
 	Name     string `json:"name"`
 	Result   string `json:"result"`
@@ -177,6 +189,23 @@ func LiveScenarioCounts(scenarios []TestScenario) (live, total int) {
 		}
 	}
 	return live, total
+}
+
+// NoLiveExercisableScenarios reports whether every scenario is untested and
+// none were driven live. That is the only shape the Test step will accept as
+// "this change has no live-validatable surface": a pass or fail, or any live
+// mark, means there was something to exercise and no-surface must not cover
+// it.
+func NoLiveExercisableScenarios(scenarios []TestScenario) bool {
+	if len(scenarios) == 0 {
+		return false
+	}
+	for _, s := range scenarios {
+		if s.Live || s.Result != ScenarioResultUntested {
+			return false
+		}
+	}
+	return true
 }
 
 // TestArtifact describes evidence produced by the test step for human review.
