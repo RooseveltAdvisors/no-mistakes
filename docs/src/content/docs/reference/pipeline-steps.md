@@ -133,6 +133,7 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 
 **Behavior:**
 
+- Before a configured test command, runs [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) once for the isolated worktree if configured; later configured lint/format commands share that successful preparation
 - If `commands.test` is set in repo config, runs it first as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) and captures output. Non-zero exit produces `error` findings. Configure a **targeted** command here (see repo-config); do not treat this field as CI-parity complete-suite configuration.
 - After the baseline passes, fails, or is absent, always invokes the evidence agent. The agent derives a proportionate list of named end-user scenarios from user intent and the change, stands up the real product, and drives each scenario end to end. Repository-specific startup guidance can be supplied through trusted [`test.instructions`](/no-mistakes/reference/repo-config/#testinstructions).
 - Each scenario records `name`, `result` (`pass`, `fail`, or `untested`), `live`, `evidence`, and `reason`; the overall `verdict` is `go`, `no-go`, or `inconclusive`. `live` is true only when that scenario was driven against the real running product in this run. Unit tests, stubs, mocks, recorded fixtures, and code inspection are not live. A scenario the machine cannot drive is `untested` with the capability that prevented it, never a guessed pass.
@@ -177,7 +178,7 @@ Runs linters and static analysis.
 
 **Behavior:**
 
-- If `commands.lint` is set: runs it via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
+- If `commands.lint` is set: ensures [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded once for the isolated worktree, then runs lint via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
 - If `commands.lint` is empty: consumes lint-category findings from the document step's combined housekeeping pass, avoiding a second cold agent invocation. If no usable combined result exists, the lint step detects appropriate linters/formatters, applies safe fixes, reruns the relevant checks, commits any agent changes, and returns structured findings only for unresolved issues.
 - Bounds those agent turns, including a configured-lint repair turn, with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely
 
@@ -197,7 +198,7 @@ Pushes the validated branch to the configured push target.
 
 **Behavior:**
 
-- If `commands.format` is set, runs it first
+- If `commands.format` is set, ensures [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded once for the isolated worktree, then runs the formatter
 - Commits any uncommitted changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
