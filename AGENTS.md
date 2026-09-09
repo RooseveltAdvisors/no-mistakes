@@ -8,7 +8,7 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 
 **Self-update channel manifest (`internal/update`)**
 
-- `no-mistakes update` reads version metadata exclusively from `channels.json` on the GitHub release-asset CDN (`releases/download/channels/channels.json`), not `api.github.com`; a token is never required. Publisher: `cmd/publish-channels`, invoked from `.github/workflows/publish-channels.yml`. Regressions: `internal/update/channels_test.go`.
+- `no-mistakes update` reads version metadata exclusively from `channels.json` on the GitHub release-asset CDN (`releases/download/channels/channels.json`), not `api.github.com`; a token is never required. Publisher: `cmd/publish-channels`, invoked from `.github/workflows/publish-channels.yml` (reusable `workflow_call`, plus `workflow_dispatch` / `on: release` backstops). `release.yml` calls it after `finalize` because GitHub does not cascade `GITHUB_TOKEN` `release` events, so release-please (pre)releases would otherwise leave the channel stale. Regressions: `internal/update/channels_test.go`, `workflow_publish_channels_test.go`, `TestReleaseWorkflowCallsPublishChannelsAfterFinalize`.
 
 **GitLab Backend (`internal/scm/gitlab`)**
 
