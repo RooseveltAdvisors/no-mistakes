@@ -2,12 +2,23 @@
 set -Eeuo pipefail
 
 repo=$(git rev-parse --show-toplevel)
-test "$repo" = "$PWD"
+if [ "$repo" != "$PWD" ]; then
+  printf 'verify must run from the repository root (%s), not a subdirectory\n' "$repo" >&2
+  exit 1
+fi
 branch=$(git branch --show-current)
-test -n "$branch"
-test "$branch" != main
-test "$branch" != master
-test -z "$(git status --porcelain)"
+if [ -z "$branch" ]; then
+  printf 'detached HEAD: no current branch to verify\n' >&2
+  exit 1
+fi
+if [ "$branch" = main ] || [ "$branch" = master ]; then
+  printf 'refusing to verify the default branch (%s); run on a feature branch\n' "$branch" >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  printf 'working tree is dirty; commit or stash before verifying\n' >&2
+  exit 1
+fi
 
 for tool in git go make; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -18,7 +29,10 @@ done
 
 evidence=.no-mistakes/evidence
 mkdir -p "$evidence"
-git check-ignore -q "$evidence/verify.log"
+if ! git check-ignore -q "$evidence/verify.log"; then
+  printf '%s is not gitignored; add it to .gitignore before verifying\n' "$evidence" >&2
+  exit 1
+fi
 exec > >(tee "$evidence/verify.log") 2>&1
 
 printf '== inventory ==\n'
