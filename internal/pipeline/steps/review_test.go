@@ -1312,6 +1312,8 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 			sctx.UserIntent = "REQUIRED: keep the guarded stale-lock removal. FORBIDDEN: a cleanup mutex."
 			sctx.IntentSource = tc.source
+			publishIntent := false
+			sctx.Config.PR.PublishIntent = &publishIntent
 
 			step := &ReviewStep{}
 			if _, err := step.Execute(sctx); err != nil {
@@ -1321,6 +1323,9 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 				t.Fatalf("expected 1 agent call, got %d", len(ag.calls))
 			}
 			prompt := ag.calls[0].Prompt
+			if !strings.Contains(prompt, sctx.UserIntent) {
+				t.Fatal("publication opt-out removed full reviewer intent")
+			}
 
 			hasConformance := strings.Contains(prompt, "Intent conformance (required)")
 			if hasConformance != tc.wantConformance {
