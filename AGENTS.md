@@ -60,10 +60,18 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 **Repo Config Trust Boundary (security)**
 
 - `commands.{prepare,test,lint,format}` and `agent` from trusted default branch pinned SHA, never pushed SHA (`loadTrustedRepoConfig`, `assertGateTrustedConfigReadable`).
-- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, the whole `ci` block, `pr.publish_intent`, `test.instructions`. `allow_repo_commands` default false on trusted branch only.
+- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `gates`, `disable_project_settings`, `no_ci`, the whole `ci` block, `pr.publish_intent`, `test.instructions`. `allow_repo_commands` default false on trusted branch only.
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
 - `pr.base_branch` trusted-only but honors `allow_repo_commands` opt-in; existing PR forge base (`scm.PRBaseBranchReader`) wins for CI repair/tip monitoring; PR lookup by branch only. Semantics: `repo-config.md`.
+
+**Repository-Declared Extra Gates (`gates`)**
+
+- `steps.WithCustomGates` inserts each configured gate immediately after its core anchor. Gates can never skip, reorder, or replace a core step. Valid anchors are `rebase`, `review`, `test`, `document`, and `lint`; `intent` and the delivery tail are refused. User-facing semantics live in `docs/src/content/docs/reference/repo-config.md`.
+- A gate step name is `gate.<anchor>.<label>`. `types.ValidCustomGateLabel` owns the path-safe label syntax. `GetStepsByRun` and the attestation use deterministic tie-breaks because gates share their anchor's step order.
+- The daemon decides a run's gate list once, stores it in `runs.gates_json`, and reads the pin during recovery. An absent pin means the core pipeline. An unparseable pin fails recovery closed.
+- `validReadableStep` accepts gate names for read-only logs. `validStep` still controls run mutations, so `--skip` and `no-mistakes.skip=` refuse gate names.
+- Regressions: `internal/config/gates_test.go`, `internal/types/gates_test.go`, `internal/pipeline/steps/customgate_test.go`, `internal/daemon/gate_pin_test.go`, `TestGetStepsByRun_PlacesAGateAfterItsAnchor`, `TestBuildPipelineAttestation_ListsAGateAfterItsAnchor`, `TestAxiLogsRefusesAGateStepNameThatWouldEscapeTheLogDirectory`, `TestSkipPushOptionRefusesARepositoryGateStepName`.
 
 **Parked / Awaiting-Agent Signal**
 
