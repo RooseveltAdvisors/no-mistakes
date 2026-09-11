@@ -265,9 +265,11 @@ Risk assessment (after listing all findings):
 	// Parse structured findings
 	var findings Findings
 	if result.Output != nil {
-		if err := json.Unmarshal(result.Output, &findings); err != nil {
+		if parsed, err := parseReviewFindingsJSON(result.Output); err != nil {
 			sctx.Log("could not parse structured output, using text response")
 			findings = Findings{Summary: result.Text}
+		} else {
+			findings = parsed
 		}
 	}
 
@@ -289,6 +291,24 @@ Risk assessment (after listing all findings):
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	})
+}
+
+func parseReviewFindingsJSON(raw []byte) (Findings, error) {
+	cleaned := strings.ReplaceAll(string(raw), "```json", "")
+	cleaned = strings.ReplaceAll(cleaned, "```", "")
+	cleaned = strings.TrimSpace(cleaned)
+
+	var findings Findings
+	if err := json.Unmarshal([]byte(cleaned), &findings); err == nil {
+		return findings, nil
+	} else if start, end := strings.IndexByte(cleaned, '{'), strings.LastIndexByte(cleaned, '}'); start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(cleaned[start:end+1]), &findings); err == nil {
+			return findings, nil
+		}
+		return Findings{}, err
+	} else {
+		return Findings{}, err
+	}
 }
 
 // fixRoundProvenanceClause reframes a rereview's fix-round changes as

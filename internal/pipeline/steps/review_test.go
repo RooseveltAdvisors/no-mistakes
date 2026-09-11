@@ -16,6 +16,47 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestParseReviewFindingsJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "fenced",
+			raw:  "```json\n{\"findings\":[{\"id\":\"r1\",\"severity\":\"warning\",\"description\":\"fenced\",\"action\":\"auto-fix\"}],\"summary\":\"one issue\"}\n```",
+		},
+		{
+			name: "plain",
+			raw:  "{\"findings\":[{\"id\":\"r1\",\"severity\":\"warning\",\"description\":\"plain\",\"action\":\"auto-fix\"}],\"summary\":\"one issue\"}",
+		},
+		{
+			name: "wrapped",
+			raw:  "The findings are:\n{\"findings\":[{\"id\":\"r1\",\"severity\":\"warning\",\"description\":\"wrapped\",\"action\":\"auto-fix\"}],\"summary\":\"one issue\"}\nDone.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			findings, err := parseReviewFindingsJSON([]byte(tt.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if findings.Summary != "one issue" {
+				t.Fatalf("summary = %q, want %q", findings.Summary, "one issue")
+			}
+			if len(findings.Items) != 1 || findings.Items[0].Description != tt.name {
+				t.Fatalf("findings = %#v, want one %s finding", findings.Items, tt.name)
+			}
+		})
+	}
+}
+
+func TestParseReviewFindingsJSON_RejectsGarbage(t *testing.T) {
+	if _, err := parseReviewFindingsJSON([]byte("not JSON")); err == nil {
+		t.Fatal("expected garbage reviewer output to fail")
+	}
+}
+
 func TestReviewStep_FixMode(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
