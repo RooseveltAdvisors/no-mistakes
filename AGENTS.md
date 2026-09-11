@@ -113,6 +113,10 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 - `axi status`/`axi logs` implicit run: current branch's active, else most recent, else none; no repo-wide fallback; detached HEAD resolves nothing. Cross-branch: `--run <id>` renders `other_branch_run:` + `current_branch:`; explicit `--run` is observation-only. Regressions: `axi_status_branch_test.go`.
 
+**Daemon Login-Shell Environment (`internal/shellenv`)**
+
+- Service `PATH` (`managedServicePath`) is a bootstrap list; effective env comes from the startup login-shell probe (`ApplyToProcessWithShellRetryExcept`). Probe runs Setsid (`detachFromTerminal`), never via `ConfigureShellCommand`. Only a missing shell binary is retried, only at startup (#143). Regressions: `shellenv_retry_test.go`.
+
 **Document+Lint Housekeeping**
 
 - Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
