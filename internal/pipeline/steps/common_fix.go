@@ -1,9 +1,12 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -22,6 +25,11 @@ type fixExecutionOptions struct {
 	ErrorPrefix             string
 	FallbackSummary         string
 	AfterAgentRun           func(*agent.Result) error
+	AgentContext            context.Context
+	// RunAgent overrides the agent-call seam while leaving preparation and
+	// post-agent commit work on the step context. Review uses it to create a
+	// fresh review_agent_timeout context at the instant each fixer starts.
+	RunAgent func(agent.RunOpts) (*agent.Result, error)
 	// SessionRole, when set, runs the fix turn in that durable review-loop
 	// session (the review step's fixer role). Steps outside the review loop
 	// leave it empty and stay session-isolated.
@@ -38,6 +46,20 @@ type commitSummary struct {
 }
 
 var errRejectedCommitSummary = errors.New("rejected commit summary")
+
+const (
+	noChangesAppliedSummary = "no changes applied"
+	changesAppliedSummary   = "changes applied"
+)
+
+const fixerRemovalRule = `
+
+Removal-first rule:
+- When a problem can be solved by removing a code path that is not strictly required to satisfy the intent - an extra acceptance or matching branch, a fallback, an alias, a second definition of something the code already defines once, or handling for an input nobody intends - fix it by removing that path, not by validating, hardening, or documenting it. Judge what the intent strictly requires against the User intent section when present, otherwise against the change's own stated purpose. Removal is the smallest fix for such a path: hardening it leaves the unrequired path in place for the next review to find another hole in.`
+
+func fixerPrompt(prompt string) string {
+	return prompt + fixerRemovalRule
+}
 
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
@@ -115,15 +137,79 @@ func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.Ste
 	return nil
 }
 
+// commitPipelineCorrection creates a pipeline-authored correction commit with
+// hook verification bypassed, and is the single owner of that bypass.
+//
+// A correction commit is machine-authored: the pipeline records the change its
+// own agents or its own formatter produced, inside the throwaway run
+// worktree. That worktree is freshly carved from the bare gate repo, so tracked
+// hooks that depend on generated untracked runtime files cannot run there - the
+// canonical case is a repository whose shared config sets core.hooksPath=.husky
+// while a tracked .husky hook sources the generated .husky/_/husky.sh that no
+// install step ever created in this worktree. The hook exits nonzero, the
+// correction commit fails, and the whole run dies on setup state that says
+// nothing about the change under review.
+//
+// --no-verify alone is not enough, because Git gates only pre-commit and
+// commit-msg on it and always runs prepare-commit-msg (builtin/commit.c
+// prepare_to_commit), so a repository carrying a legacy .husky
+// prepare-commit-msg hook - commitizen and ticket-prefix setups are the common
+// ones - still fails the exact commit this helper exists to complete. Pointing
+// core.hooksPath at a freshly created empty directory for this one invocation
+// covers the whole commit hook family; --no-verify is kept so the intent stays
+// explicit at the call. The override lives only in this process argument list
+// and the directory is removed afterwards, so nothing persists in the
+// repository, the user's configuration, or the daemon's environment.
+//
+// Reach is deliberately narrow. Only commitAgentFixes (Review, Test, Document,
+// Lint) and the Push step's leftover-worktree commit route here, because those
+// are the two commits the pipeline authors from its own agents' and formatter's
+// output.
+// CI repair commits, the generic git runner, and every user-authored commit keep
+// hook verification; the Review, Test, Document, Lint, Push, PR, and CI gates
+// remain the authoritative quality checks for what these commits contain.
+func commitPipelineCorrection(ctx context.Context, workDir, message string, logf func(string)) error {
+	return commitPipelineCorrectionWithCleanup(ctx, workDir, message, logf, os.RemoveAll)
+}
+
+func commitPipelineCorrectionWithCleanup(
+	ctx context.Context,
+	workDir, message string,
+	logf func(string),
+	cleanup func(string) error,
+) error {
+	emptyHooksDir, err := os.MkdirTemp("", "no-mistakes-correction-hooks-")
+	if err != nil {
+		return fmt.Errorf("prepare hook-free commit environment: %w", err)
+	}
+	_, commitErr := git.Run(ctx, workDir, "-c", "core.hooksPath="+emptyHooksDir, "commit", "--no-verify", "-m", message)
+	if cleanupErr := cleanup(emptyHooksDir); cleanupErr != nil {
+		if logf != nil {
+			logf(fmt.Sprintf("warning: failed to remove temporary hook-free commit directory %s: %v", emptyHooksDir, cleanupErr))
+		} else {
+			slog.Warn("failed to remove temporary hook-free commit directory", "path", emptyHooksDir, "error", cleanupErr)
+		}
+	}
+	return commitErr
+}
+
 func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
+	_, err := commitAgentFixesWithResult(sctx, stepName, summary, fallbackSummary)
+	return err
+}
+
+func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) (bool, error) {
 	ctx := sctx.Ctx
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
-		return err
+		return false, err
 	}
-	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("check %s changes: %w", stepName, err)
+	}
 	if strings.TrimSpace(status) == "" {
 		sctx.Log("no agent changes to commit")
-		return nil
+		return false, nil
 	}
 	if summary == "" {
 		summary = fallbackSummary
@@ -133,24 +219,24 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	}
 	commitMessage, err := sctx.Config.Commit.RenderFixMessage(stepName, summary)
 	if err != nil {
-		return fmt.Errorf("render %s fix commit message: %w", stepName, err)
+		return false, fmt.Errorf("render %s fix commit message: %w", stepName, err)
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
-		return fmt.Errorf("stage %s changes: %w", stepName, err)
+	if err := stagePipelineChanges(sctx); err != nil {
+		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", commitMessage); err != nil {
-		return fmt.Errorf("commit %s changes: %w", stepName, err)
+	if err := commitPipelineCorrection(ctx, sctx.WorkDir, commitMessage, sctx.Log); err != nil {
+		return false, fmt.Errorf("commit %s changes: %w", stepName, err)
 	}
 	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
-		return fmt.Errorf("resolve head after %s commit: %w", stepName, err)
+		return false, fmt.Errorf("resolve head after %s commit: %w", stepName, err)
 	}
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
-		return err
+		return false, err
 	}
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
-		return fmt.Errorf("update local branch ref: %w", err)
+		return false, fmt.Errorf("update local branch ref: %w", err)
 	}
 	startingHead := strings.TrimSpace(sctx.ReviewStartingHeadSHA)
 	if startingHead == "" {
@@ -158,13 +244,20 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	}
 	sctx.Run.HeadSHA = headSHA
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-		return err
+		return false, err
 	}
 	if stepName == types.StepReview {
 		pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
 	}
 	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
-	return nil
+	return true, nil
+}
+
+func fixResultSummary(committed bool) string {
+	if committed {
+		return changesAppliedSummary
+	}
+	return noChangesAppliedSummary
 }
 
 func extractCommitSummary(result *agent.Result) (string, error) {
@@ -186,10 +279,6 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	return cleaned, nil
 }
 
-// executeFixMode runs the fix agent and commits any resulting changes. It
-// returns the agent's one-line fix summary (empty when the agent returned
-// nothing parseable), which the caller should place on StepOutcome.FixSummary
-// so the executor can persist it on the round record.
 func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (string, error) {
 	if !sctx.Fixing {
 		return "", nil
@@ -205,7 +294,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		purpose = string(stepName) + "-fix"
 	}
 	runOpts := agent.RunOpts{
-		Prompt:     opts.Prompt,
+		Prompt:     fixerPrompt(opts.Prompt),
 		CWD:        sctx.WorkDir,
 		JSONSchema: commitSummarySchema,
 		OnChunk:    sctx.LogChunk,
@@ -214,12 +303,19 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	var result *agent.Result
 	var err error
-	if opts.SessionRole != "" {
-		result, err = sctx.RunAgentSession(opts.SessionRole, runOpts)
+	if opts.RunAgent != nil {
+		result, err = opts.RunAgent(runOpts)
 	} else {
-		result, err = sctx.Agent.Run(sctx.Ctx, runOpts)
+		agentCtx := sctx.Ctx
+		if opts.AgentContext != nil {
+			agentCtx = opts.AgentContext
+		}
+		result, err = sctx.RunAgentSessionContext(agentCtx, opts.SessionRole, runOpts)
 	}
 	if err != nil {
+		if opts.ErrorPrefix == "" {
+			return "", err
+		}
 		return "", fmt.Errorf("%s: %w", opts.ErrorPrefix, err)
 	}
 	if opts.AfterAgentRun != nil {
@@ -234,8 +330,9 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
 	}
-	if err := commitAgentFixes(sctx, stepName, summary, opts.FallbackSummary); err != nil {
+	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary)
+	if err != nil {
 		return "", err
 	}
-	return summary, nil
+	return fixResultSummary(committed), nil
 }
