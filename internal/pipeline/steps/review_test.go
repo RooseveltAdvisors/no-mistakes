@@ -57,6 +57,43 @@ func TestParseReviewFindingsJSON_RejectsGarbage(t *testing.T) {
 	}
 }
 
+// TestReviewStep_FencedFindingsJSONReachesFindings reproduces the herdr-recovery
+// validation failure: a reviewer agent wraps its findings JSON in markdown code
+// fences inside the structured Output, and the step must still surface the
+// findings instead of silently degrading to an empty text summary.
+func TestReviewStep_FencedFindingsJSONReachesFindings(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	fenced := "```json\n" +
+		`{"findings":[{"id":"fence-1","severity":"warning","file":"internal/pipeline/steps/review.go","line":1,"description":"possible nil dereference in fenced output","action":"auto-fix"}],"summary":"one fenced issue","risk_level":"low","risk_rationale":"bounded.","risk_scope":"source-or-external"}` +
+		"\n```"
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(fenced), Text: "review complete"}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	step := &ReviewStep{}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("expected fenced findings to park the run for review, got clean approval")
+	}
+	if !strings.Contains(outcome.Findings, "possible nil dereference in fenced output") {
+		t.Fatalf("expected parsed finding in outcome, got: %s", outcome.Findings)
+	}
+	if strings.Contains(outcome.Findings, "```") {
+		t.Fatalf("expected fence markers stripped from findings, got: %s", outcome.Findings)
+	}
+}
+
 func TestReviewStep_FixMode(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
