@@ -99,6 +99,11 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 - `publishRunHead` must write an existing PR attestation for the proposed head before pushing it on every supported provider with raw content reads. `docs/src/content/docs/reference/repo-config.md` (`pr.template`) owns provider-specific ownership/budget and visible Bitbucket metadata caveats. The protocol has single-publisher scope because the daemon enforces one active run per repository branch; do not add cross-publisher coordination without a separate requirement. Detailed behavior is owned by `docs/src/content/docs/reference/pipeline-steps.md`; local rationale lives in `attestHeadBeforePush` and `publishRunHead`. Regressions: `TestPushStep_AttestsHeadBeforePush`, `TestPushStep_AttestationWriteFailureAbortsBeforePush`, `TestPushStep_UnavailableSCMLeavesStaleAttestationFailingClosed`, `TestPushStep_PushFailureAfterAttestationLeavesBodyAhead`, and `TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes`.
 
+**Private Mirror and Empty-Index Handoffs**
+
+- `internal/gate` owns private-mirror reconciliation. The accepted Decision 41-A exception, containment and final-tree survival requirements, exact archive-before-delete contract, and descendant preservation are owned by `docs/src/content/docs/concepts/gate-model.md` (Private mirror reconciliation). Decision 41-A permits only a mirror head exactly equal to `Run.SubmittedHeadSHA` to bypass patch proof; it is an explicit exception, not a claim that ownership proves containment. `push.go` must settle shared gate/worktree refs only once. Behavioral coverage lives in `internal/gate/reconcile_test.go` and `internal/pipeline/steps/push_test.go`.
+- The correction and CI repair handoff contract is owned by `docs/src/content/docs/reference/pipeline-steps.md`; `stagedChangesPresent` implements the index check in `internal/pipeline/steps/common_fix.go`.
+
 **Custody Recovery (`internal/branchsync`)**
 
 - Missing-head keep-local (#958): `missingHeadKeepLocalRuns` checked first; verified head absent from worktree+gate with compatible recovery refs offers `recover_custody` via `--recover --keep-local` (explicit discard); plain `--recover` refuses.

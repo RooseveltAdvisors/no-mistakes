@@ -568,6 +568,23 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string) (ciRep
 	if err := stagePipelineChanges(sctx); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
 	}
+	staged, err := stagedChangesPresent(func(args ...string) (string, error) {
+		return stepGitRun(sctx, args...)
+	})
+	if err != nil {
+		return ciRepairResult{}, fmt.Errorf("inspect staged CI changes: %w", err)
+	}
+	if !staged {
+		sctx.Log("no staged CI changes to commit")
+		headSHA, err := stepGitHeadSHA(sctx)
+		if err != nil {
+			return ciRepairResult{}, fmt.Errorf("resolve head after empty CI handoff: %w", err)
+		}
+		if headSHA != sctx.Run.HeadSHA {
+			return s.recordRepair(sctx, headSHA)
+		}
+		return ciRepairResult{}, nil
+	}
 	// The CI repair commit is a fix-round commit too: strip AI co-author
 	// trailers from the message before the commit object exists.
 	commitMessage, err := git.StripCommitMessage(sctx.Ctx, sctx.WorkDir, message)
@@ -673,10 +690,10 @@ func ciRepairContinuityGap(sctx *pipeline.StepContext, headSHA string) string {
 // Review has approved it again. The CI monitor turns that into a restart at
 // Review.
 func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
-	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := stepGitRun(sctx, "update-ref", ref, headSHA); err != nil {
-		return ciRepairResult{}, fmt.Errorf("update local branch ref: %w", err)
+	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
+		return ciRepairResult{}, err
 	}
+	startingHead := sctx.Run.HeadSHA
 	// Durable first, then in memory. Advancing the live head before the write
 	// succeeds leaves the monitor watching a head the durable record does not
 	// know about, still holding its old review approval, with the revalidation
@@ -686,6 +703,7 @@ func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (
 	}
 	sctx.Run.HeadSHA = headSHA
 	sctx.Run.ReviewApprovedHeadSHA = nil
+	pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
 	sctx.Log("committed CI repair for revalidation")
 	return ciRepairResult{HeadAdvanced: true, Revalidate: true}, nil
 }
