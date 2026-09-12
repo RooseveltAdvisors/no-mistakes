@@ -128,6 +128,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 **Telemetry**
 
 - Read-only surfaces (`axi` home/status/logs, `status`, `runs`): NO remote telemetry; never reintroduce `trackCommand`/`trackAxiSurface`/`ReadSurfaceGate` there. Perf local-only (`agent_invocations`); remote terminal run event counts only. `internal/agent/invocationmetrics.go` owns fidelity fields.
+- Token/fidelity fields are nullable: not-reported (incl. failed/cancelled invocations) stored as NULL, never zero.
 
 ## Maintaining this file
 
