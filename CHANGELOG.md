@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.75.2](https://github.com/kunchenguid/no-mistakes/compare/v1.75.1...v1.75.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **pipeline:** attest approved test command failures ([#1070](https://github.com/kunchenguid/no-mistakes/issues/1070)) ([b3b818e](https://github.com/kunchenguid/no-mistakes/commit/b3b818e9e8f040c8257a4fbcd8adcbb0fa568bde))
+
 ## [1.75.1](https://github.com/kunchenguid/no-mistakes/compare/v1.75.0...v1.75.1) (2026-09-12)
 
 
