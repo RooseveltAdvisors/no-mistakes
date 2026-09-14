@@ -183,6 +183,9 @@ func TestStartStepFixRoundResetsRoundClockAndUpdatesLimit(t *testing.T) {
 	if _, err := d.sql.Exec(`UPDATE step_results SET started_at = ?, round_started_at = ?, auto_fix_limit = ? WHERE id = ?`, stepStarted, stepStarted, priorAutoFixLimit, step.ID); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.SetStepOverrideReason(step.ID, "approved over failure"); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.StartStepFixRound(step.ID, 2); err != nil {
 		t.Fatalf("start fix round: %v", err)
 	}
@@ -201,6 +204,9 @@ func TestStartStepFixRoundResetsRoundClockAndUpdatesLimit(t *testing.T) {
 	}
 	if got.AutoFixLimit == nil || *got.AutoFixLimit != 2 {
 		t.Errorf("auto-fix limit = %v, want newly configured 2 instead of prior %d", got.AutoFixLimit, priorAutoFixLimit)
+	}
+	if got.OverrideReason != nil {
+		t.Errorf("override reason = %q, want nil", *got.OverrideReason)
 	}
 }
 
@@ -278,6 +284,9 @@ func TestCompleteStepWithStatus(t *testing.T) {
 	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
+	if err := d.SetStepOverrideReason(step.ID, "approved over failure"); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.CompleteStepWithStatus(step.ID, types.StepStatusSkipped, 0, 1500, "/logs/run-1/review.log"); err != nil {
 		t.Fatalf("complete step with status: %v", err)
 	}
@@ -296,6 +305,9 @@ func TestCompleteStepWithStatus(t *testing.T) {
 	}
 	if got.CompletedAt == nil {
 		t.Error("expected non-nil completed_at")
+	}
+	if got.OverrideReason != nil {
+		t.Errorf("override reason = %q, want nil", *got.OverrideReason)
 	}
 }
 
@@ -320,6 +332,9 @@ func TestResetStepsFromPreservesSkippedSteps(t *testing.T) {
 	if err := d.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 10, ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.SetStepOverrideReason(review.ID, "approved over failure"); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.CompleteStepWithStatus(push.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -334,6 +349,9 @@ func TestResetStepsFromPreservesSkippedSteps(t *testing.T) {
 	}
 	if gotReview.Status != types.StepStatusPending {
 		t.Fatalf("review status = %s, want %s", gotReview.Status, types.StepStatusPending)
+	}
+	if gotReview.OverrideReason != nil {
+		t.Fatalf("review override reason = %q, want nil", *gotReview.OverrideReason)
 	}
 	gotPush, err := d.GetStepResult(push.ID)
 	if err != nil {
@@ -379,7 +397,7 @@ func TestParkStepForApproval_FindingsFailureRollsBackGate(t *testing.T) {
 	}
 	findings := `{"items":[{"id":"review-1"}]}`
 
-	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 100, &findings); err == nil {
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 7, 100, &findings); err == nil {
 		t.Fatal("expected findings persistence failure")
 	}
 	gotStep, err := d.GetStepResult(step.ID)

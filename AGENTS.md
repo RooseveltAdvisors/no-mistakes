@@ -70,7 +70,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 **Repo Config Trust Boundary (security)**
 
 - `commands.{prepare,test,lint,format}` and `agent` from trusted default branch pinned SHA, never pushed SHA (`loadTrustedRepoConfig`, `assertGateTrustedConfigReadable`).
-- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `gates`, `disable_project_settings`, `no_ci`, the whole `ci` block, `pr.template`, `pr.publish_intent`, `test.instructions`. `allow_repo_commands` default false on trusted branch only.
+- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `gates`, `disable_project_settings`, `no_ci`, the whole `ci` block, `pr.template`, `pr.publish_intent`, `test.instructions`, `test.allow_approve_over_failure`. `allow_repo_commands` default false on trusted branch only.
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
 - `pr.base_branch` trusted-only but honors `allow_repo_commands` opt-in; existing PR forge base (`scm.PRBaseBranchReader`) wins for CI repair/tip monitoring; PR lookup by branch only. Semantics: `repo-config.md`.
@@ -89,7 +89,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 **Approval Override Is Never a Silent Clean Pass (`pipeline.ApprovalOverrideVerifier`)**
 
-- Only `CIStep` implements it; both `ActionApprove` sites route through `Executor.applyApprovalOverride`. Approval always proceeds; unresolved or verify-error marks `db.SetStepOverrideReason` (fail closed). Reason rides `run_completed` (`ipc.Event.CIOverrideReason`) for the TUI banner. Tests: `executor_approval_override_test.go`, `ci_approval_override_test.go`.
+- `CIStep` (still-failing checks) and `TestStep` (persisted failing `commands.test`) implement it; both `ActionApprove` sites route through `Executor.applyApprovalOverride`. Approval always proceeds; unresolved or verify-error marks `db.SetStepOverrideReason` (fail closed). Reason rides `run_completed` (`ipc.Event.CIOverrideReason`) for the TUI banner. Tests: `executor_approval_override_test.go`, `ci_approval_override_test.go`, `test_approval_override_test.go`.
 
 **Stale Actions Event Replay (`require-no-mistakes`)**
 

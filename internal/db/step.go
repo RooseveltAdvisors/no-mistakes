@@ -27,8 +27,9 @@ type StepResult struct {
 	AgentPID       *int
 	AutoFixLimit   *int
 	// OverrideReason is non-nil exactly when a human answered ActionApprove on
-	// this step's gate despite an unresolved external condition (currently:
-	// the CI step's live checks were still failing). See
+	// this step's gate despite an unresolved condition (currently: the CI
+	// step's live checks were still failing, or the Test step's configured
+	// commands.test exited non-zero). See
 	// pipeline.ApprovalOverrideVerifier and Executor's two ActionApprove sites.
 	OverrideReason *string
 	// SkipReason records an automatic PR/CI skip, distinct from an explicit
@@ -131,7 +132,7 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
-			agent_pid = NULL, auto_fix_limit = NULL
+			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL
 		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
 	if err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
@@ -157,7 +158,7 @@ func (d *DB) UpdateStepStatusWithDuration(id string, status types.StepStatus, du
 	return nil
 }
 
-func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, durationMS int64, findingsJSON *string) error {
+func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return fmt.Errorf("begin approval park: %w", err)
@@ -166,8 +167,8 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 
 	ts := now()
 	stepResult, err := tx.Exec(
-		`UPDATE step_results SET status = ?, duration_ms = ?, findings_json = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`,
-		status, durationMS, findingsJSON, ts, fmt.Sprintf("status: %s", status), stepID,
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, findings_json = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`,
+		status, exitCode, durationMS, findingsJSON, ts, fmt.Sprintf("status: %s", status), stepID,
 	)
 	if err != nil {
 		return fmt.Errorf("park step for approval: %w", err)
@@ -221,7 +222,7 @@ func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 // one recorded by an earlier execution.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ? WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
 	}
@@ -276,8 +277,8 @@ func (d *DB) CompleteSkippedStep(id string, exitCode int, durationMS int64, logP
 
 func (d *DB) completeStep(id string, status types.StepStatus, exitCode int, durationMS int64, logPath, skipReason string) error {
 	_, err := d.sql.Exec(
-		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, skip_reason = NULLIF(?, '') WHERE id = ?`,
-		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), skipReason, id,
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, skip_reason = NULLIF(?, ''), override_reason = CASE WHEN ? THEN NULL ELSE override_reason END WHERE id = ?`,
+		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), skipReason, status == types.StepStatusSkipped, id,
 	)
 	if err != nil {
 		return fmt.Errorf("complete step: %w", err)
