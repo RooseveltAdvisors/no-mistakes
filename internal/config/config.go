@@ -177,7 +177,7 @@ type GlobalConfig struct {
 	// user does not control (the common case when contributing to someone
 	// else's project), and a trusted repo value still wins over it.
 	CI     CIRaw
-	Commit CommitRaw
+	Commit GlobalCommitRaw
 	Intent IntentRaw
 	Test   TestRaw
 	// Eval is resolved at load time because it is global-only: it describes
@@ -213,7 +213,7 @@ type globalConfigRaw struct {
 	SessionReuse            *bool                      `yaml:"session_reuse"`
 	AutoFix                 AutoFixRaw                 `yaml:"auto_fix"`
 	CI                      CIRaw                      `yaml:"ci"`
-	Commit                  CommitRaw                  `yaml:"commit"`
+	Commit                  GlobalCommitRaw            `yaml:"commit"`
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Eval                    EvalRaw                    `yaml:"eval"`
@@ -1104,9 +1104,11 @@ ci:
 # Auto-fix commit subject template. Available variables: {{.Step}}, {{.Summary}}, and {{.Branch}}.
 # {{.Branch}} is the normalized branch name, or the only capture group from
 # branch_pattern when configured. A branch pattern with no match fails safely.
-# Repo config may override these values.
+# Global-only branch_replacement can add literal text around that group with ${1}.
+# Repo config may override fix_message and branch_pattern.
 # commit:
-#   branch_pattern: '([A-Z]+-[0-9]+)'
+#   branch_pattern: '^PROJ/([0-9]+)$'
+#   branch_replacement: 'PROJ-${1}'
 #   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"
 # To use the captured identifier in the subject, replace fix_message with:
 #   fix_message: "{{.Branch}}: {{.Summary}}"
@@ -1991,7 +1993,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
-	if err := validateCommitRaw(raw.Commit); err != nil {
+	if err := validateGlobalCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateTestRaw(raw.Test); err != nil {
@@ -2861,11 +2863,15 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	if global.Commit.BranchPattern != nil {
 		commit.BranchPattern = *global.Commit.BranchPattern
 	}
+	if global.Commit.BranchReplacement != nil {
+		commit.BranchReplacement = *global.Commit.BranchReplacement
+	}
 	if repo.Commit.FixMessage != nil {
 		commit.FixMessage = *repo.Commit.FixMessage
 	}
 	if repo.Commit.BranchPattern != nil {
 		commit.BranchPattern = *repo.Commit.BranchPattern
+		commit.BranchReplacement = ""
 	}
 
 	providers := Providers{}
