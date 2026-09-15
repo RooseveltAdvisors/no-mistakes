@@ -81,6 +81,9 @@ ci:
   rerun_transient: 0
   revalidate_repairs: false
 
+rebase:
+  strategy: rebase # or: merge
+
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
   # branch_pattern: '^PROJ/([0-9]+)$'
@@ -665,6 +668,22 @@ ci:
 ```
 
 A value in the trusted repository config overrides this global value in both directions: an explicit repository `true` enables revalidation when this is `false`, and an explicit repository `false` disables opt-in revalidation when this is `true`. When the trusted repository config omits the key, this global value applies.
+
+### rebase.strategy
+
+The operator-level default for [`rebase.strategy`](/no-mistakes/reference/repo-config/#rebasestrategy), whose per-repository reference owns the semantics, the trade-off, and the trust boundary.
+
+| | |
+|---|---|
+| Type | `string` (`rebase` or `merge`) |
+| Default | `rebase` |
+
+```yaml
+rebase:
+  strategy: merge
+```
+
+A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies. An unrecognized value fails the config closed rather than falling back to the default, so a typo cannot quietly keep rewriting history a maintainer asked to stop rewriting.
 
 ### commit.fix_message
 
