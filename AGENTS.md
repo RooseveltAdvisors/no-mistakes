@@ -133,6 +133,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 **Pipeline Step Tests (CI latency)**
 
 - Fake `gh`/`glab`/`git` (and the trailer-strip stand-in) are the non-race `internal/pipeline/fakecli` helper (`stepstest.Init`/`LinkFakeCLI`); never re-exec the race test binary. CI-monitor tests live in `steps/citest`; both run under `go test ./...`.
+- Tests needing real Git use `internal/testgit.RealGit` (fixed absolute paths, not PATH).
 
 **Telemetry**
 
