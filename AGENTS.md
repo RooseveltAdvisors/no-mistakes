@@ -131,6 +131,12 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 - Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
 
+**Review Fix-Round Carry (`internal/pipeline/executor.go`, `internal/pipeline/findings.go`)**
+
+- Review gate decides on an append-only outstanding set; a selected finding leaves only on positive coverage (trusted `reviewed_paths`, no re-report or other finding in that file) or explicit approve/skip/abort.
+- Clean review certifies the head only when `reviewed_paths` covers every trusted reviewable path; otherwise `NeedsApproval` (`uncoveredReviewMessage`). Fake agent fills coverage via `withReviewCoverage`.
+- Recovery keeps a selected ID only if its current finding matches the recorded identity (`retainFindingIDsByIdentity`).
+
 **Pipeline Step Tests (CI latency)**
 
 - Fake `gh`/`glab`/`git` (and the trailer-strip stand-in) are the non-race `internal/pipeline/fakecli` helper (`stepstest.Init`/`LinkFakeCLI`); never re-exec the race test binary. CI-monitor tests live in `steps/citest`; both run under `go test ./...`.
