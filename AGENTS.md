@@ -83,6 +83,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
 - `pr.base_branch` trusted-only but honors `allow_repo_commands` opt-in; existing PR forge base (`scm.PRBaseBranchReader`) wins for CI repair/tip monitoring; PR lookup by branch only. Semantics: `repo-config.md`.
+- Per-run Pi pin (`--model`/`--effort`) is immutable (`runs.pi_profile`) and fully validated before superseding an active run (`ResolvePiProfile`, `validatePiProfileAgentsBeforeCancel`); `ApplyPiProfile` enforces after. Semantics: `global-config.md`.
 
 **Repository-Declared Extra Gates (`gates`)**
 
