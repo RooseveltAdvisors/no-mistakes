@@ -100,7 +100,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 **Approval Override Is Never a Silent Clean Pass (`pipeline.ApprovalOverrideVerifier`)**
 
 - `CIStep` (still-failing checks) and `TestStep` (persisted failing `commands.test`) implement it; both `ActionApprove` sites route through `Executor.applyApprovalOverride`. Approval always proceeds; unresolved or verify-error marks `db.SetStepOverrideReason` (fail closed). Reason rides `run_completed` (`ipc.Event.CIOverrideReason`) for the TUI banner. Tests: `executor_approval_override_test.go`, `ci_approval_override_test.go`, `test_approval_override_test.go`.
-- Test approval explanation lives in `step_results.approval_reason` (NULL = none, empty = no reason); only failing configured command or `no-go`/`inconclusive` qualifies as `passed-with-override` (`db.StepResult.TestOverrideReason`); never reuse `override_reason` for all Test approvals. Configured-command override goes on the attestation; `verify.py` refuses it unless trusted `test.allow_approve_over_failure`. Tests: `internal/e2e/test_approval_exception_test.go`.
+- Test approval explanation lives in `step_results.approval_reason` (NULL = none, empty = no reason); only failing configured command, `no-go`/`inconclusive`, or a Test-agent budget cut qualifies as `passed-with-override` (`db.StepResult.TestOverrideReason`); never reuse `override_reason` for all Test approvals. Configured-command override goes on the attestation; `verify.py` refuses it unless trusted `test.allow_approve_over_failure`. Tests: `internal/e2e/test_approval_exception_test.go`.
 
 **Stale Actions Event Replay (`require-no-mistakes`)**
 
