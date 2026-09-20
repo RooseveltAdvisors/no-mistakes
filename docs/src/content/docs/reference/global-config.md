@@ -96,6 +96,7 @@ intent:
   threshold: 0.2
   slack_days: 3
   disabled_readers: []
+  # publish_intent: false # Keep the generated Intent section out of PR bodies by default
 
 test:
   evidence:
@@ -870,8 +871,11 @@ When enabled and no intent was supplied directly for the run, no-mistakes can re
 | `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
 | `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
 | `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
+| `intent.publish_intent`   | `bool`     | `true`  | Publish the generated Intent section on PR bodies by default |
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
+
+`intent.publish_intent: false` is a global, operator-side default that keeps the generated `## Intent` section out of the PR body for runs started without an explicit override. It is the caller-side counterpart of the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent): both are tighten-only, the repository's trusted policy remains the ceiling a caller can never exceed, and review, test, document, lint, and CI auto-fix prompts keep the full intent. Under the caller-side omission the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; the intent is withheld from them, never scanned out of their output. A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes. This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
 
 The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
 All-deletion diffs still match against the deleted changed files.
