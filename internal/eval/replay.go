@@ -201,7 +201,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	// object pools, and Store.Prune all live under <NM_HOME>/eval, so a live
 	// sandbox nested there would sit inside the very state it is replaying.
 	// That isolation outranks moving it off the system temp directory; see the
-	// held-scope note in AGENTS.md ("no-mistakes Owns Its Own Scratch").
+	// held-scope note in AGENTS.md ("Scratch Paths").
 	root, err := os.MkdirTemp("", "nm-eval-replay-")
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create isolated replay root: %v", err))
