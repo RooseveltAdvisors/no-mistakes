@@ -345,12 +345,52 @@ review_agents:
     effort: max
 ```
 
-The only role keys are `reviewer` and `fixer`. Each configured role requires one
+The role keys are `reviewer`, `fixer`, and their optional later-round overlays
+`reviewer_after_round` and `fixer_after_round`. Each configured role requires one
 explicit `agent` (the same harness names as `agent_config`; no `auto` or lists).
 Model and effort are optional and inherit `agent_config` for that harness when
 empty. Nonempty role values override that profile, but native
 `agent_args_override` flags still win. Model availability, credentials, and
 supported effort levels remain the harness/provider's responsibility.
+
+#### Later-round role overrides
+
+`reviewer_after_round` and `fixer_after_round` are opt-in overlays for long
+review loops, where the first pass is worth a stronger tier and later rounds are
+mostly re-checking a fix the stronger model already prescribed. Each takes the
+same `agent` / `model` / `effort` fields plus `after_round`: the number of
+leading rounds that stay on the base role. `after_round` defaults to `1`, so the
+overlay takes over from round 2.
+
+```yaml
+review_agents:
+  fixer:
+    agent: pi
+    model: anthropic-vertex/claude-opus-4-8
+  fixer_after_round:
+    agent: pi
+    model: google-vertex/gemini-3.8-flash
+    after_round: 2
+```
+
+Rounds 1 and 2 above run on the `fixer` profile; round 3 and every later round
+run on `fixer_after_round`. The direction is yours: point the overlay at a
+cheaper tier to stop long loops from spending at the top tier, or at a stronger
+one to escalate a loop that is not converging.
+
+Without these keys nothing changes - every round runs on the role it runs on
+today. They only select the harness for a round; they never change how many
+rounds happen, and `auto_fix` plus the gate remain the only things that bound
+the loop. The overlay applies to a round the pipeline numbered; an invocation
+outside a numbered round keeps the base role. Only the base roles accept plain
+`agent` / `model` / `effort` - setting `after_round` on `reviewer` or `fixer`, or
+a value below 1, is a configuration error. Because a later-round fixer may be a
+harness that cannot resume sessions, fixer session reuse is reported for every
+fixer a run can use: configuring a non-resumable `fixer_after_round` turns fix
+turns cold for the whole run rather than handing round 3 a session it cannot
+resume. `no-mistakes stats --run <id>` shows the agent and served model per
+invocation alongside its round, so which tier served which round is visible
+after the fact.
 
 Both roles can use the same harness with different models. Reviews and rereviews
 always run fresh; only review fixes reuse the fixer's session when
@@ -635,7 +675,7 @@ Per-run agent session reuse for the review loop's fixer role.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns.
+When enabled and every fixer that can serve the run supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns. A configured later-round fixer that cannot resume therefore makes all fixer turns cold for that run; see [later-round role overrides](#later-round-role-overrides).
 Review turns - the initial full review and every full rereview - always run as fresh, session-free invocations regardless of this setting: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record. Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
