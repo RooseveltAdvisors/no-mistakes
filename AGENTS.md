@@ -142,6 +142,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 **Document+Lint Housekeeping**
 
 - Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
+- Agent memory files are hands-off in step prompts (`agent.MemoryFilesRule`; conflict resolvers use `MemoryFilesConflictRule`; document gets correction-only exception). Prompt contract, not a guard. Tests: `memory_files_test.go`.
 
 **Review Fix-Round Carry (`internal/pipeline/executor.go`, `internal/pipeline/findings.go`)**
 
