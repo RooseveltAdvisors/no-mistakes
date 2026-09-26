@@ -175,6 +175,50 @@ func EnsureGateNeutralized(a Agent) error {
 		"~/.no-mistakes/config.yaml", a.Name())
 }
 
+// FilterGateNeutralizing partitions a fallback candidate list into members
+// that individually neutralize the target repo's project agent-instruction
+// files and members that do not. Callers under the trusted opt-out must
+// filter to the neutralized slice before building the fallback and before any
+// launch decision: a fallback wrapper's NeutralizesGateInstructions fails
+// closed over its WHOLE member set, so building it from an unfiltered list
+// and only then checking would refuse a run that has a perfectly good
+// neutralizing member alongside an unverified one.
+func FilterGateNeutralizing(agents []Agent) (neutralized, refused []Agent) {
+	for _, a := range agents {
+		if NeutralizesGateInstructions(a) {
+			neutralized = append(neutralized, a)
+		} else {
+			refused = append(refused, a)
+		}
+	}
+	return neutralized, refused
+}
+
+// ErrGateNeutralizationRefused builds the refusal error for a set of
+// candidate agents that lack a verified gate-neutralization knob, naming
+// every one of them. Callers must use this instead of EnsureGateNeutralized
+// on an already-built fallback wrapper, whose error names only the wrapper's
+// first member (Name() delegates to agents[0]) even when a different member
+// is the actual reason for the refusal.
+func ErrGateNeutralizationRefused(refused []Agent) error {
+	if len(refused) == 0 {
+		return fmt.Errorf("no gate agent configured")
+	}
+	names := make([]string, 0, len(refused))
+	for _, a := range refused {
+		if a == nil {
+			names = append(names, "<nil>")
+			continue
+		}
+		names = append(names, a.Name())
+	}
+	return fmt.Errorf("%s does not neutralize the target repository's project "+
+		"agent-instruction files (AGENTS.md/CLAUDE.md); refusing to launch it in the target "+
+		"checkout. Only codex, claude, and pi have a verified neutralization knob (and only when it "+
+		"is not overridden by agent_args_override); set 'agent' to codex, claude, or pi in "+
+		"~/.no-mistakes/config.yaml", strings.Join(names, ", "))
+}
+
 // LifecycleEvent describes process-level activity for an agent invocation.
 // The pipeline records these as step log lines and active-step heartbeats.
 type LifecycleEvent struct {
