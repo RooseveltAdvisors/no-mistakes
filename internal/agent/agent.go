@@ -157,9 +157,14 @@ func NeutralizesGateInstructions(a Agent) bool {
 
 // EnsureGateNeutralized fails closed when the agent that will run gate steps in
 // the target checkout does not neutralize that checkout's project
-// agent-instruction files. Callers must invoke it before launching any gate
-// agent so an unverified harness is refused with a clear error rather than run
-// unneutralized in the target checkout. Only codex, claude, and pi have a verified
+// agent-instruction files, refusing it with a clear error rather than letting it
+// run unneutralized. It must never be called on an already-built fallback
+// wrapper: that wrapper fails closed over its WHOLE member set and its Name()
+// forwards to members[0], so one unverified member voids the run and the error
+// misnames the culprit. Callers holding a fallback candidate list must use
+// FilterGateNeutralizing and ErrGateNeutralizationRefused instead; this stays
+// the correct check for a single, non-fallback-wrapped agent (for example the
+// eval replay candidate). Only codex, claude, and pi have a verified
 // neutralization knob today.
 func EnsureGateNeutralized(a Agent) error {
 	if a == nil {

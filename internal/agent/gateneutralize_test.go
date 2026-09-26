@@ -234,8 +234,8 @@ func TestErrGateNeutralizationRefused_NamesActualMembersNotFallbackFirst(t *test
 	if err == nil {
 		t.Fatal("expected a refusal error")
 	}
-	if strings.Contains(err.Error(), `"pi"`) {
-		t.Errorf("refusal error must not name the fallback's first member pi, got: %v", err)
+	if !strings.HasPrefix(err.Error(), "antigravity ") {
+		t.Errorf("refusal error must lead with the actual non-neutralizing member antigravity, never the fallback's first member, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "antigravity") {
 		t.Errorf("refusal error must name the actual non-neutralizing member antigravity, got: %v", err)
