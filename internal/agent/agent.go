@@ -302,8 +302,9 @@ type Options struct {
 	// DisableProjectSettings, when true, asks a supported adapter (codex,
 	// claude, pi) to launch with the target repo's project-level agent
 	// settings/instructions suppressed. It is the resolved, trusted-only opt-out
-	// from config.Config; adapters without a verified suppression knob ignore it
-	// and are refused separately by EnsureGateNeutralized when the opt-out is on.
+	// from config.Config; when the opt-out is on, adapters without a verified
+	// suppression knob are filtered out and closed before launch, and the run
+	// is refused only when none remain.
 	DisableProjectSettings bool
 }
 

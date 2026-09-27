@@ -427,8 +427,9 @@ type Config struct {
 	Review                Review
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
 	// RepoConfig field). When true, gate agents are launched with their
-	// project-level settings/instructions suppressed; the daemon fails the run
-	// closed if the resolved harness has no verified suppression knob.
+	// project-level settings/instructions suppressed; the launch site drops
+	// candidates without a verified suppression knob before launch and fails
+	// the run closed only when no candidate remains.
 	DisableProjectSettings bool
 	// NoCI is the resolved, trusted-only declaration that this repository
 	// intentionally has no CI (see the RepoConfig field). When true and the
