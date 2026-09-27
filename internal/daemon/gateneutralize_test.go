@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -100,6 +102,11 @@ func TestNewPipelineAgent_OptOut_FallbackOfOnlyVerifiedMembersRuns(t *testing.T)
 // single unverified member refused every member, including the verified
 // ones.
 func TestNewPipelineAgent_OptOut_MixedFallbackRunsFilteringUnverifiedMembers(t *testing.T) {
+	var logOut bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logOut, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
 	cfg := &config.Config{
 		Agents:                 []types.AgentName{types.AgentPi, types.AgentClaude, types.AgentCodex, types.AgentOpenCode},
 		DisableProjectSettings: true,
@@ -111,6 +118,9 @@ func TestNewPipelineAgent_OptOut_MixedFallbackRunsFilteringUnverifiedMembers(t *
 	defer func() { _ = ag.Close() }()
 	if !agent.NeutralizesGateInstructions(ag) {
 		t.Error("the filtered fallback must report neutralized")
+	}
+	if out := logOut.String(); !strings.Contains(out, "dropping from fallback") || !strings.Contains(out, string(types.AgentOpenCode)) {
+		t.Errorf("dropping a configured member must warn and name it, got log: %s", out)
 	}
 }
 

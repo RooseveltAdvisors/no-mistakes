@@ -276,6 +276,9 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 	// remain. Outside the opt-out, every adapter runs exactly as before.
 	if cfg.DisableProjectSettings {
 		neutralized, refused := agent.FilterGateNeutralizing(created)
+		if len(refused) > 0 {
+			slog.Warn("gate agent(s) do not neutralize project agent-instruction files under disable_project_settings; dropping from fallback", "refused", refusedAgentNames(refused))
+		}
 		if len(neutralized) == 0 {
 			for _, existing := range created {
 				_ = existing.Close()
@@ -288,6 +291,14 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		created = neutralized
 	}
 	return agent.NewFallback(created), nil
+}
+
+func refusedAgentNames(refused []agent.Agent) string {
+	names := make([]string, 0, len(refused))
+	for _, a := range refused {
+		names = append(names, a.Name())
+	}
+	return strings.Join(names, ", ")
 }
 
 func resolveGitPath(workDir, value string) string {
@@ -985,6 +996,9 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		// before (backward-compat).
 		if cfg.DisableProjectSettings {
 			neutralized, refused := agent.FilterGateNeutralizing(created)
+			if len(refused) > 0 {
+				slog.Warn("gate agent(s) do not neutralize project agent-instruction files under disable_project_settings; dropping from fallback", "run_id", run.ID, "refused", refusedAgentNames(refused))
+			}
 			if len(neutralized) == 0 {
 				err := agent.ErrGateNeutralizationRefused(refused)
 				m.db.UpdateRunError(run.ID, err.Error())
