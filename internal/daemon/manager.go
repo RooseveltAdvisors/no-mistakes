@@ -277,7 +277,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 	if cfg.DisableProjectSettings {
 		neutralized, refused := agent.FilterGateNeutralizing(created)
 		if len(refused) > 0 {
-			slog.Warn("gate agent(s) do not neutralize project agent-instruction files under disable_project_settings; dropping from fallback", "refused", refusedAgentNames(refused))
+			slog.Warn("gate agent candidate(s) do not neutralize project agent-instruction files under disable_project_settings", "refused", refusedAgentNames(refused))
 		}
 		if len(neutralized) == 0 {
 			for _, existing := range created {
@@ -285,6 +285,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 			}
 			return nil, agent.ErrGateNeutralizationRefused(refused)
 		}
+		cfg.Agent = types.AgentName(neutralized[0].Name())
 		for _, existing := range refused {
 			_ = existing.Close()
 		}
@@ -997,7 +998,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		if cfg.DisableProjectSettings {
 			neutralized, refused := agent.FilterGateNeutralizing(created)
 			if len(refused) > 0 {
-				slog.Warn("gate agent(s) do not neutralize project agent-instruction files under disable_project_settings; dropping from fallback", "run_id", run.ID, "refused", refusedAgentNames(refused))
+				slog.Warn("gate agent candidate(s) do not neutralize project agent-instruction files under disable_project_settings", "run_id", run.ID, "refused", refusedAgentNames(refused))
 			}
 			if len(neutralized) == 0 {
 				err := agent.ErrGateNeutralizationRefused(refused)
@@ -1008,6 +1009,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 				}
 				return "", err
 			}
+			cfg.Agent = types.AgentName(neutralized[0].Name())
 			for _, existing := range refused {
 				_ = existing.Close()
 			}

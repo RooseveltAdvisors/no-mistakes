@@ -119,8 +119,31 @@ func TestNewPipelineAgent_OptOut_MixedFallbackRunsFilteringUnverifiedMembers(t *
 	if !agent.NeutralizesGateInstructions(ag) {
 		t.Error("the filtered fallback must report neutralized")
 	}
-	if out := logOut.String(); !strings.Contains(out, "dropping from fallback") || !strings.Contains(out, string(types.AgentOpenCode)) {
+	if out := logOut.String(); !strings.Contains(out, "gate agent candidate(s) do not neutralize") || !strings.Contains(out, string(types.AgentOpenCode)) {
 		t.Errorf("dropping a configured member must warn and name it, got log: %s", out)
+	}
+}
+
+// TestNewPipelineAgent_OptOut_AgentLabelReflectsSurvivingPrimary proves the
+// config's primary agent label is reassigned to the first surviving member
+// after filtering: with [opencode, codex] under the opt-out, opencode never
+// runs, so cfg.Agent must name codex - the value every run telemetry event
+// reports - not the filtered-out resolved[0].
+func TestNewPipelineAgent_OptOut_AgentLabelReflectsSurvivingPrimary(t *testing.T) {
+	cfg := &config.Config{
+		Agents:                 []types.AgentName{types.AgentOpenCode, types.AgentCodex},
+		DisableProjectSettings: true,
+	}
+	ag, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath)
+	if err != nil {
+		t.Fatalf("a mixed fallback list must still run under opt-out, got: %v", err)
+	}
+	defer func() { _ = ag.Close() }()
+	if cfg.Agent != types.AgentCodex {
+		t.Errorf("cfg.Agent = %q, want the surviving primary %q, not the filtered-out first member", cfg.Agent, types.AgentCodex)
+	}
+	if !agent.NeutralizesGateInstructions(ag) {
+		t.Error("the filtered fallback must report neutralized")
 	}
 }
 
