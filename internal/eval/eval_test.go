@@ -753,6 +753,18 @@ func setupCapturedRunWithHistory(t *testing.T, ctx context.Context, padCommits i
 
 func setupCapturedRunWithHistoryAndFindings(t *testing.T, ctx context.Context, padCommits int, findings string) (*paths.Paths, *db.DB, *db.Run, *db.Repo, *db.StepRound) {
 	t.Helper()
+	return setupCapturedRunWithRepoConfig(t, ctx, padCommits, findings, fixtureRepoConfigYAML)
+}
+
+// fixtureRepoConfigYAML is the repository config the fixture commits into the
+// reviewed worktree and records as capture provenance.
+const fixtureRepoConfigYAML = "review:\n  path_instructions:\n    - path: '*.go'\n      instructions: review error paths\n"
+
+// setupCapturedRunWithRepoConfig builds the fixture around a caller-supplied
+// repository config, written to .no-mistakes.yaml in the reviewed worktree and
+// captured as the round's config provenance.
+func setupCapturedRunWithRepoConfig(t *testing.T, ctx context.Context, padCommits int, findings, repoConfigContent string) (*paths.Paths, *db.DB, *db.Run, *db.Repo, *db.StepRound) {
+	t.Helper()
 	root := t.TempDir()
 	p := paths.WithRoot(root)
 	if err := p.EnsureDirs(); err != nil {
@@ -771,7 +783,7 @@ func setupCapturedRunWithHistoryAndFindings(t *testing.T, ctx context.Context, p
 	mustGit(t, ctx, root, "clone", gateDir, workDir)
 	mustGit(t, ctx, workDir, "config", "user.email", "eval@example.test")
 	mustGit(t, ctx, workDir, "config", "user.name", "Eval Test")
-	if err := os.WriteFile(filepath.Join(workDir, ".no-mistakes.yaml"), []byte("review:\n  path_instructions:\n    - path: '*.go'\n      instructions: review error paths\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, ".no-mistakes.yaml"), []byte(repoConfigContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package sample\n"), 0o644); err != nil {
