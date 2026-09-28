@@ -2,7 +2,6 @@ package gate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -155,10 +154,6 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		satisfiers := reconcileSatisfiers(runOwnedHeads)
 		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, atRiskCommits)
 		if err != nil {
-			var bounded *RecoveryScanBoundedError
-			if errors.As(err, &bounded) {
-				return plan, fmt.Errorf("inspect recovery anchors for %s: %w. Clears on any of: %s", branchRef, err, joinSatisfiers(satisfiers[:len(satisfiers)-1]))
-			}
 			return plan, fmt.Errorf("inspect recovery anchors for %s: %w", branchRef, err)
 		}
 		remaining := make([]string, 0, len(atRiskCommits))
@@ -373,28 +368,12 @@ func joinSatisfiers(satisfiers []string) string {
 	return strings.Join(satisfiers[:len(satisfiers)-1], "; ") + "; or " + satisfiers[len(satisfiers)-1]
 }
 
-// maxRecoveryCandidates bounds how many candidate commits the recovery-anchor
-// credit scan will answer for when recovery anchors exist. Exceeding it is
-// reported as RecoveryScanBoundedError and never degraded to a partial answer:
-// quietly returning what happened to fit would silently drop preservation
-// credit and reintroduce the deadlock this credit exists to prevent.
+// maxRecoveryCandidates bounds how many candidate commits one recovery-anchor
+// membership scan passes to git, keeping each rev-list argument list bounded.
+// Larger candidate sets are scanned in successive batches, never truncated or
+// refused: dropping any candidate would silently drop its preservation credit
+// and reintroduce the deadlock this credit exists to prevent.
 const maxRecoveryCandidates = 512
-
-// RecoveryScanBoundedError reports that the recovery-anchor credit scan could
-// not run within its deterministic bound. It is a refusal, not a verdict: no
-// commit is credited and none is declared at risk, because neither could be
-// determined.
-type RecoveryScanBoundedError struct {
-	Candidates    int
-	MaxCandidates int
-}
-
-func (e *RecoveryScanBoundedError) Error() string {
-	return fmt.Sprintf(
-		"recovery-anchor credit scan bounded at %d candidate commits, but %d need checking: refusing rather than answering from a truncated scan",
-		e.MaxCandidates, e.Candidates,
-	)
-}
 
 // preservedByRecoveryAnchors reports, for each candidate commit only, a
 // recovery anchor that keeps it reachable in the gate repository. Reachable
@@ -424,29 +403,27 @@ func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, c
 	if len(anchors) == 0 {
 		return preserved, nil
 	}
-	if len(commits) > maxRecoveryCandidates {
-		return nil, &RecoveryScanBoundedError{
-			Candidates:    len(commits),
-			MaxCandidates: maxRecoveryCandidates,
-		}
-	}
 	anchorHeads := make([]string, 0, len(anchors))
 	for _, anchor := range anchors {
 		anchorHeads = append(anchorHeads, anchor.head)
 	}
 
-	// One scan: the candidates NO anchor reaches. Its complement is preserved.
-	args := make([]string, 0, len(commits)+len(anchorHeads)+2)
-	args = append(args, commits...)
-	args = append(args, "--not", liveHead)
-	args = append(args, anchorHeads...)
-	unreached, err := commitList(ctx, gateDir, args...)
-	if err != nil {
-		return nil, err
-	}
-	unreachedSet := make(map[string]bool, len(unreached))
-	for _, commit := range unreached {
-		unreachedSet[commit] = true
+	// One scan per batch: the candidates NO anchor reaches. Its complement is
+	// preserved.
+	unreachedSet := make(map[string]bool)
+	for start := 0; start < len(commits); start += maxRecoveryCandidates {
+		batch := commits[start:min(start+maxRecoveryCandidates, len(commits))]
+		args := make([]string, 0, len(batch)+len(anchorHeads)+2)
+		args = append(args, batch...)
+		args = append(args, "--not", liveHead)
+		args = append(args, anchorHeads...)
+		unreached, err := commitList(ctx, gateDir, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, commit := range unreached {
+			unreachedSet[commit] = true
+		}
 	}
 	for _, commit := range commits {
 		if unreachedSet[commit] {

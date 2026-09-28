@@ -2,12 +2,10 @@ package gate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -802,45 +800,29 @@ func TestPreservedByRecoveryAnchorsWithoutAnchorsCreditsNothing(t *testing.T) {
 	}
 }
 
-// The credit scan is bounded to the candidates and says so when it cannot
-// answer within that bound. Exhaustion is an explicit refusal, never a silent
-// empty result: returning what happened to fit would drop preservation credit
-// for the rest and quietly reintroduce the deadlock the credit exists to end.
-func TestPreservedByRecoveryAnchorsRefusesOutOfBoundsScanExplicitly(t *testing.T) {
+// A candidate set larger than one scan batch is scanned in successive
+// batches, never truncated or refused: a long, fully anchored private history
+// must still earn its preservation credit, including for a commit that only
+// the last batch examines.
+func TestPreservedByRecoveryAnchorsScansOversizedCandidateSetsInBatches(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, gateDir, privateHead, _, liveHead := setupAnchoredPrivateBranch(t)
-	reconcileGit(t, gateDir, "update-ref", "refs/no-mistakes/recover/01MBOUNDEDANCHOR00000000000000", privateHead)
+	work, gateDir, privateHead, _, liveHead := setupAnchoredPrivateBranch(t)
+	reconcileGit(t, gateDir, "fetch", work, liveHead+":refs/heads/live")
+	anchor := "refs/no-mistakes/recover/01MBATCHEDANCHOR00000000000000"
+	reconcileGit(t, gateDir, "update-ref", anchor, privateHead)
 
 	candidates := make([]string, maxRecoveryCandidates+1)
 	for i := range candidates {
-		candidates[i] = fmt.Sprintf("%040d", i)
+		candidates[i] = privateHead
 	}
 	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, candidates)
-	if err == nil {
-		t.Fatalf("oversized scan answered instead of refusing: %+v", preserved)
+	if err != nil {
+		t.Fatalf("oversized anchored scan refused instead of batching: %v", err)
 	}
-	if preserved != nil && len(preserved) != 0 {
-		t.Fatalf("oversized scan returned partial credit, which is the silent degradation this must never do: %+v", preserved)
+	if got := preserved[privateHead]; got != anchor {
+		t.Fatalf("oversized anchored scan credited %q for %s, want %q", got, privateHead, anchor)
 	}
-	var bounded *RecoveryScanBoundedError
-	if !errors.As(err, &bounded) {
-		t.Fatalf("oversized scan did not report RecoveryScanBoundedError: %v", err)
-	}
-	if bounded.MaxCandidates != maxRecoveryCandidates || bounded.Candidates != len(candidates) {
-		t.Fatalf("bounded error named the wrong counts: %+v", bounded)
-	}
-	message := err.Error()
-	for _, want := range []string{
-		"bounded at",
-		strconv.Itoa(maxRecoveryCandidates),
-		"refusing rather than answering from a truncated scan",
-	} {
-		if !strings.Contains(message, want) {
-			t.Fatalf("bounded refusal is not actionable, missing %q in: %v", want, err)
-		}
-	}
-	t.Logf("Explicit bounded refusal: %v", err)
 }
 
 // The scan answers only about the candidates it is handed: an anchor holding

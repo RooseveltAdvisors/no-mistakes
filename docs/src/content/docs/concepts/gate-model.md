@@ -128,12 +128,12 @@ rev-list` of the candidates that excludes the live head as well as every
 anchor; because the candidates are private-only, that walk is bounded by the
 private-only range. Only credited commits are then attributed to the first
 anchor that reaches them. When no recovery anchor exists no credit is possible
-and the ordinary at-risk refusal is returned. Otherwise the deterministic bound
-is `maxRecoveryCandidates` in `internal/gate/reconcile.go`: exceeding it is a
-`RecoveryScanBoundedError` - an explicit refusal that names the bound and the
-clearing proofs available to that call shape - never a truncated answer. A
-scan that quietly returned the rows that fit would drop preservation credit
-for the rest and silently reintroduce the deadlock the credit exists to end.
+and the ordinary at-risk refusal is returned. Otherwise the candidates are
+scanned in successive batches of `maxRecoveryCandidates` (in
+`internal/gate/reconcile.go`), so a long, fully anchored history still earns
+its credit; the scan is never truncated or refused by size, because dropping
+candidates would drop their preservation credit and silently reintroduce the
+deadlock the credit exists to end.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to a head the publishing run itself
