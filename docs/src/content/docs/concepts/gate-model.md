@@ -123,8 +123,8 @@ head before removing the branch ref. A commit no anchor reaches is still
 refused, and the refusal names every proof that would clear it.
 
 The credit scan never walks what the anchors can see. Recovery anchors
-accumulate for the life of the gate, so the membership scan is one `git
-rev-list` of the candidates that excludes the live head as well as every
+accumulate for the life of the gate, so each membership scan is a `git
+rev-list` of candidates that excludes the live head as well as every
 anchor; because the candidates are private-only, that walk is bounded by the
 private-only range. Only credited commits are then attributed to the first
 anchor that reaches them. When no recovery anchor exists no credit is possible
