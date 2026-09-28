@@ -700,13 +700,15 @@ func TestPlanStaleBranchReconciliationStillRefusesUnanchoredCommitsAndNamesTheSa
 		privateHead, // the unanchored at-risk commit is still named
 		"second private-only change",
 		"refs/no-mistakes/recover/<run>", // the new satisfier is named
-		"Decision 41-A",
 		"patch-ID",
 		"ancestry",
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("refusal did not name satisfier %q in: %v", want, err)
 		}
+	}
+	if strings.Contains(message, "Decision 41-A") {
+		t.Fatalf("refusal without a run-owned head offered the Decision 41-A satisfier: %v", err)
 	}
 	if strings.Contains(message, firstPrivateHead) {
 		t.Fatalf("refusal still listed the anchored commit %s: %v", firstPrivateHead, err)
@@ -715,6 +717,32 @@ func TestPlanStaleBranchReconciliationStillRefusesUnanchoredCommitsAndNamesTheSa
 		t.Fatalf("refusal moved private branch to %s, want %s", got, privateHead)
 	}
 	t.Logf("Preserved private branch; refusal: %v", err)
+}
+
+// A refusal lists only satisfiers the call shape can actually take: the
+// publication variant supplied with a run-owned head names Decision 41-A, while
+// the fresh-submission shape (no run-owned head) never does.
+func TestPlanStaleBranchReconciliationNamesRunOwnedSatisfierOnlyWhenSupplied(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work, gateDir, _, firstPrivateHead, liveHead := setupAnchoredPrivateBranch(t)
+
+	_, err := PlanMirrorPublicationReconciliation(ctx, gateDir, work, "feature/reconcile", liveHead, firstPrivateHead)
+	if err == nil {
+		t.Fatal("unanchored private commit was reconciled instead of refused")
+	}
+	if !strings.Contains(err.Error(), "Decision 41-A") {
+		t.Fatalf("refusal omitted the supplied run-owned satisfier: %v", err)
+	}
+
+	_, err = PlanStaleBranchReconciliation(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+	if err == nil {
+		t.Fatal("unanchored private commit was reconciled instead of refused")
+	}
+	if strings.Contains(err.Error(), "Decision 41-A") {
+		t.Fatalf("fresh-submission refusal offered an unreachable satisfier: %v", err)
+	}
+	t.Logf("Run-owned satisfier listed only when supplied; refusal: %v", err)
 }
 
 // A symbolic recovery ref is not preservation evidence. It is never
@@ -749,9 +777,9 @@ func TestPlanStaleBranchReconciliationIgnoresSymbolicRecoveryAnchors(t *testing.
 func TestPreservedByRecoveryAnchorsWithoutAnchorsCreditsNothing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, gateDir, privateHead, _, _ := setupAnchoredPrivateBranch(t)
+	_, gateDir, privateHead, _, liveHead := setupAnchoredPrivateBranch(t)
 
-	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, []string{privateHead})
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, []string{privateHead})
 	if err != nil {
 		t.Fatalf("preservedByRecoveryAnchors: %v", err)
 	}
