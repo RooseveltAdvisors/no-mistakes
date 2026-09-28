@@ -28,6 +28,11 @@ type StaleBranchPlan struct {
 	BranchRef            string
 	PreviousHead         string
 	ArchiveTag           string
+	// PreservedByRecovery names the recovery anchor that keeps each
+	// private-only commit reachable for commits this plan excluded from the
+	// at-risk set on that basis. Keyed by full commit ID. Empty when no commit
+	// needed the recovery-anchor credit.
+	PreservedByRecovery map[string]string
 }
 
 // ReconcileStaleBranch plans and immediately applies stale private gate branch
@@ -131,20 +136,45 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		if err != nil {
 			return plan, fmt.Errorf("compare private mirror content for %s: %w", branchRef, err)
 		}
-		if len(atRiskCommits) > 0 {
-			atRisk := make([]string, 0, len(atRiskCommits))
-			for _, commit := range atRiskCommits {
+		// Recovery anchors are the tool's own sanctioned preservation record:
+		// terminalization pins every verified unpublished head at
+		// refs/no-mistakes/recover/<run>, and PreserveRecoveryAnchor never
+		// replaces evidence (a conflicting anchor fails closed). A commit that
+		// one of those anchors keeps reachable is not at risk of being lost, so
+		// it is re-derived out of the at-risk set instead of deadlocking the
+		// recover -> rerun -> push loop that wrote the anchor in the first
+		// place. This is a preservation credit, not containment evidence: the
+		// surviving content still has to be proven by the checks above for any
+		// commit no anchor holds.
+		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, atRiskCommits)
+		if err != nil {
+			return plan, fmt.Errorf("inspect recovery anchors for %s: %w", branchRef, err)
+		}
+		remaining := make([]string, 0, len(atRiskCommits))
+		for _, commit := range atRiskCommits {
+			if _, ok := preserved[commit]; !ok {
+				remaining = append(remaining, commit)
+			}
+		}
+		if len(remaining) > 0 {
+			atRisk := make([]string, 0, len(remaining))
+			for _, commit := range remaining {
 				description, describeErr := git.Run(ctx, gateDir, "show", "-s", "--format=%H %s", commit)
 				if describeErr != nil {
 					return plan, fmt.Errorf("describe at-risk private mirror commit %s: %w", commit, describeErr)
 				}
 				atRisk = append(atRisk, description)
 			}
+			// Name the exact satisfier so this refusal is actionable instead of a
+			// dead end. Every listed proof is one this function accepts.
 			return plan, fmt.Errorf(
-				"refusing to reconcile private mirror ref %s: %d at-risk commit(s) contain content absent from live head %s: %s",
-				branchRef, len(atRisk), liveHead, strings.Join(atRisk, "; "),
+				"refusing to reconcile private mirror ref %s: %d at-risk commit(s) contain content absent from live head %s: %s. "+
+					"Clears on any of: the live head descending from the private head (ancestry); per-file patch-ID plus tree-survival proof (the content already landing in the live tree); "+
+					"the private head being exactly the publishing run's Run.SubmittedHeadSHA or Run.LastPushedSHA (Decision 41-A); or a refs/no-mistakes/recover/<run> recovery anchor reaching the commit",
+				branchRef, len(remaining), liveHead, strings.Join(atRisk, "; "),
 			)
 		}
+		plan.PreservedByRecovery = preserved
 	}
 
 	return StaleBranchPlan{
@@ -154,6 +184,7 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		BranchRef:            branchRef,
 		PreviousHead:         gateHead,
 		ArchiveTag:           archiveTag,
+		PreservedByRecovery:  plan.PreservedByRecovery,
 	}, nil
 }
 
@@ -273,6 +304,81 @@ func ArchivedHeadRecorded(ctx context.Context, gateDir, branch, head string) boo
 // A rebased live head otherwise carries every default-branch
 // commit since the merge base, and hashing each of those files would cost
 // thousands of git invocations to answer a question about a handful of paths.
+// recoveryAnchorPrefix is the ref namespace terminalization pins a run's
+// unpublished pipeline head to (custody.RecoveryRef). An anchor is created only
+// by the guarded custody path and never replaced: PreserveRecoveryAnchor
+// creates it with an expected-old-value of the zero ID and fails closed on any
+// conflicting existing ref, so a commit reachable from one is held by
+// deliberate, immutable preservation evidence rather than by accident.
+const recoveryAnchorPrefix = "refs/no-mistakes/recover/"
+
+type recoveryAnchor struct {
+	ref  string
+	head string
+}
+
+// listRecoveryAnchors returns the direct commit targets under
+// refs/no-mistakes/recover/. Symbolic, zero, and non-commit targets are
+// deliberately skipped rather than dereferenced: they contribute no
+// preservation evidence, and skipping them is the conservative direction
+// (nothing gets credited).
+func listRecoveryAnchors(ctx context.Context, gateDir string) ([]recoveryAnchor, error) {
+	out, err := git.Run(ctx, gateDir, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", recoveryAnchorPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var anchors []recoveryAnchor
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		ref, head := fields[0], fields[1]
+		if git.IsZeroSHA(head) {
+			continue
+		}
+		objectType, err := git.Run(ctx, gateDir, "cat-file", "-t", head)
+		if err != nil || objectType != "commit" {
+			continue
+		}
+		anchors = append(anchors, recoveryAnchor{ref: ref, head: head})
+	}
+	return anchors, nil
+}
+
+// preservedByRecoveryAnchors reports, for each commit that still looks at risk,
+// a recovery anchor that keeps it reachable in the gate repository. Reachable
+// means reachable: the anchor's commit history contains the commit, so the
+// object and its history survive whatever happens to the private branch ref.
+//
+// This is a PRESERVATION credit only. It says nothing about whether the content
+// lands in the published tree, which the ancestry, patch-ID and tree-survival
+// checks above are responsible for proving. It exists so that the sanctioned
+// recover -> rerun -> push loop cannot deadlock against the very anchor that
+// loop wrote to declare the work preserved.
+func preservedByRecoveryAnchors(ctx context.Context, gateDir string, commits []string) (map[string]string, error) {
+	preserved := make(map[string]string)
+	if len(commits) == 0 {
+		return preserved, nil
+	}
+	anchors, err := listRecoveryAnchors(ctx, gateDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(anchors) == 0 {
+		return preserved, nil
+	}
+	for _, commit := range commits {
+		for _, anchor := range anchors {
+			if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", commit, anchor.head); err == nil {
+				preserved[commit] = anchor.ref
+				break
+			}
+		}
+	}
+	return preserved, nil
+}
+
 func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privateHead string) ([]string, error) {
 	privateOnly, err := commitList(ctx, repoDir, "--right-only", liveHead+"..."+privateHead)
 	if err != nil {

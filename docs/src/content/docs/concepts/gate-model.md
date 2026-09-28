@@ -104,6 +104,24 @@ discarded by a merge or revert from being counted as surviving content. If that
 survival check cannot prove preservation, the private-only range is reported
 as at risk.
 
+**Recovery-anchor preservation credit (issue #1233):** a private-only commit
+that a `refs/no-mistakes/recover/<run>` anchor reaches is *preserved*, so it is
+re-derived out of the at-risk set. Those anchors are the tool's own sanctioned
+preservation record - terminalization pins every verified unpublished head at
+that ref before the managed worktree can be removed, and
+`custody.PreserveRecoveryAnchor` never replaces evidence (a conflicting or
+symbolic anchor fails closed and is never dereferenced). The credit exists so
+the sanctioned `sync --recover` -> rerun -> push loop cannot deadlock against
+the very anchor that loop wrote to declare the work preserved.
+
+This is a **preservation credit, not containment evidence**. It says nothing
+about whether the content lands in the published tree; ancestry, patch
+identity and final-tree survival remain the only proofs of that, and Decision
+41-A below remains the only head exception. The archive-before-delete contract
+is unchanged, so a credited reconciliation still archives the exact private
+head before removing the branch ref. A commit no anchor reaches is still
+refused, and the refusal names every proof that would clear it.
+
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to a head the publishing run itself
 placed on the mirror** without patch-ID or tree-survival proof: its

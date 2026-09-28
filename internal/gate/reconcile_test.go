@@ -613,3 +613,149 @@ func TestReconcileStaleBranchRefusesPatchesDiscardedByOursMerge(t *testing.T) {
 		})
 	}
 }
+
+// setupAnchoredPrivateBranch builds the recover -> rerun -> push shape from
+// issue #1233: a private branch holding two private-only commits, a live head
+// carrying unrelated work so neither commit is contained, and a bare gate whose
+// branch ref still points at the pre-rebase private head.
+func setupAnchoredPrivateBranch(t *testing.T) (work, gateDir, privateHead, firstPrivateHead, liveHead string) {
+	t.Helper()
+	work = initReconcileRepo(t)
+	base := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	writeReconcileFile(t, work, "private.txt", "unique pre-rebase change\n")
+	reconcileGit(t, work, "add", "private.txt")
+	reconcileGit(t, work, "commit", "-m", "private-only pre-rebase work")
+	firstPrivateHead = reconcileGit(t, work, "rev-parse", "HEAD")
+	writeReconcileFile(t, work, "second-private.txt", "another unique change\n")
+	reconcileGit(t, work, "add", "second-private.txt")
+	reconcileGit(t, work, "commit", "-m", "second private-only change")
+	privateHead = reconcileGit(t, work, "rev-parse", "HEAD")
+
+	reconcileGit(t, work, "reset", "--hard", base)
+	writeReconcileFile(t, work, "live.txt", "different live work\n")
+	reconcileGit(t, work, "add", "live.txt")
+	reconcileGit(t, work, "commit", "-m", "live branch work")
+	liveHead = reconcileGit(t, work, "rev-parse", "HEAD")
+
+	gateDir = filepath.Join(t.TempDir(), "gate.git")
+	reconcileGit(t, "", "init", "--bare", gateDir)
+	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
+	return work, gateDir, privateHead, firstPrivateHead, liveHead
+}
+
+// The recover -> rerun -> push loop writes refs/no-mistakes/recover/<run> to
+// declare the unpublished chain preserved. Reconciliation must credit that
+// anchor instead of refusing against the very evidence the loop just wrote.
+func TestPlanStaleBranchReconciliationCreditsRecoveryAnchoredCommits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work, gateDir, privateHead, firstPrivateHead, liveHead := setupAnchoredPrivateBranch(t)
+
+	anchor := "refs/no-mistakes/recover/01M3GQ106JNJRM9DFQSPF48NSE"
+	reconcileGit(t, gateDir, "update-ref", anchor, privateHead)
+
+	plan, err := PlanStaleBranchReconciliation(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+	if err != nil {
+		t.Fatalf("recovery-anchored chain was refused instead of reconciled: %v", err)
+	}
+	if !plan.Reconcile {
+		t.Fatalf("recovery-anchored chain did not plan reconciliation: %+v", plan)
+	}
+	for _, commit := range []string{firstPrivateHead, privateHead} {
+		if got := plan.PreservedByRecovery[commit]; got != anchor {
+			t.Fatalf("commit %s credited to %q, want %q (map: %+v)", commit, got, anchor, plan.PreservedByRecovery)
+		}
+	}
+	// The branch is still archived before deletion, so nothing depends on the
+	// anchor alone.
+	result, err := ApplyStaleBranchReconciliation(ctx, gateDir, plan)
+	if err != nil {
+		t.Fatalf("apply after anchored plan: %v", err)
+	}
+	if !result.Reconciled || result.ArchivedTag == "" {
+		t.Fatalf("anchored reconciliation did not archive before delete: %+v", result)
+	}
+	t.Logf("Reconciled against recovery anchor %s; archive %s", anchor, result.ArchivedTag)
+}
+
+// The credit is a preservation credit, not a blanket bypass: a private commit
+// no anchor reaches is still refused, and the refusal names every satisfier so
+// it is actionable rather than a dead end.
+func TestPlanStaleBranchReconciliationStillRefusesUnanchoredCommitsAndNamesTheSatisfier(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work, gateDir, privateHead, firstPrivateHead, liveHead := setupAnchoredPrivateBranch(t)
+
+	// Anchor reaches only the first commit's parent chain shape by pointing at
+	// the first commit, so the second private commit stays unanchored.
+	reconcileGit(t, gateDir, "update-ref", "refs/no-mistakes/recover/01M3H865WHYBM2QWPD8ZY1QG81", firstPrivateHead)
+
+	_, err := PlanStaleBranchReconciliation(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+	if err == nil {
+		t.Fatal("unanchored private commit was reconciled instead of refused")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		privateHead, // the unanchored at-risk commit is still named
+		"second private-only change",
+		"refs/no-mistakes/recover/<run>", // the new satisfier is named
+		"Decision 41-A",
+		"patch-ID",
+		"ancestry",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("refusal did not name satisfier %q in: %v", want, err)
+		}
+	}
+	if strings.Contains(message, firstPrivateHead) {
+		t.Fatalf("refusal still listed the anchored commit %s: %v", firstPrivateHead, err)
+	}
+	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != privateHead {
+		t.Fatalf("refusal moved private branch to %s, want %s", got, privateHead)
+	}
+	t.Logf("Preserved private branch; refusal: %v", err)
+}
+
+// A symbolic recovery ref is not preservation evidence. It is never
+// dereferenced, and it must not credit anything.
+func TestPlanStaleBranchReconciliationIgnoresSymbolicRecoveryAnchors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work, gateDir, privateHead, _, liveHead := setupAnchoredPrivateBranch(t)
+
+	symbolic := "refs/no-mistakes/recover/01MSYMBOLICANCHOR000000000000"
+	reconcileGit(t, gateDir, "symbolic-ref", symbolic, "refs/heads/feature/reconcile")
+
+	anchors, err := listRecoveryAnchors(ctx, gateDir)
+	if err != nil {
+		t.Fatalf("listRecoveryAnchors: %v", err)
+	}
+	if len(anchors) != 0 {
+		t.Fatalf("symbolic recovery ref produced evidence: %+v", anchors)
+	}
+
+	_, err = PlanStaleBranchReconciliation(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+	if err == nil {
+		t.Fatal("symbolic recovery ref was credited instead of ignored")
+	}
+	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != privateHead {
+		t.Fatalf("refusal moved private branch to %s, want %s", got, privateHead)
+	}
+	t.Logf("Symbolic anchor credited nothing; refusal: %v", err)
+}
+
+// An empty or missing anchor namespace must not error, and must credit nothing.
+func TestPreservedByRecoveryAnchorsWithoutAnchorsCreditsNothing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, gateDir, privateHead, _, _ := setupAnchoredPrivateBranch(t)
+
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, []string{privateHead})
+	if err != nil {
+		t.Fatalf("preservedByRecoveryAnchors: %v", err)
+	}
+	if len(preserved) != 0 {
+		t.Fatalf("no anchors existed but commits were credited: %+v", preserved)
+	}
+}
