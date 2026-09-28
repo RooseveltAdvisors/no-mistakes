@@ -60,6 +60,9 @@ func TestParseReviewFindingsJSON(t *testing.T) {
 // with one mock agent and the evidence turn now always runs: the review step
 // ignores the extra fields, and the test step would otherwise reject the
 // payload as an incomplete contract.
+// ReviewedPaths carries the full coverage record of the template repo's one
+// changed file: a clean review certifies only with positive coverage, and a
+// fixture without it now spends the focused coverage completion pass.
 func cleanReviewFindings() Findings {
 	return Findings{
 		Items:          []Finding{},
@@ -67,6 +70,7 @@ func cleanReviewFindings() Findings {
 		Tested:         []string{"go test ./..."},
 		TestingSummary: "drove the change end to end",
 		Artifacts:      []types.TestArtifact{{Kind: "command-output", Label: "suite", Content: "ok"}},
+		ReviewedPaths:  []string{"feature.txt"},
 		Scenarios: []types.TestScenario{{
 			Name:     "the change works for a user",
 			Result:   types.ScenarioResultPass,
@@ -221,8 +225,10 @@ func TestReviewStep_FencedFindingsJSONReachesFindings(t *testing.T) {
 // was decided from hasBlockingFindings alone. An OMITTED reviewed_paths is
 // held to the same bar: the field is schema-optional only so an older
 // payload still parses, never a legacy pass that clears the head unread
-// (VISION.md R4). Each parked case logs which reviewable files went
-// unverified so the operator can see why a clean review did not approve.
+// (VISION.md R4). Each parked case first spends the focused coverage
+// completion pass (whose canned answer here repeats the same gap), and the
+// final park names which reviewable files went unverified so the operator
+// can see why a clean review did not approve.
 func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -247,7 +253,9 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 			name:              "reviewed_paths present but empty does not grant approval",
 			output:            json.RawMessage(`{"findings":[],"reviewed_paths":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
 			wantNeedsApproval: true,
-			wantLog:           "review coverage is incomplete; parking for approval with 1 reviewable file(s) unverified: feature.txt",
+			// The completion pass answers with the same empty record, so the
+			// merge yields nothing and the park reports the field as unreported.
+			wantLog: "review reported no reviewed_paths; parking for approval with 1 reviewable file(s) unverified: feature.txt",
 		},
 		{
 			name:              "reviewed_paths present and covering the reviewable set approves",
@@ -836,7 +844,10 @@ func TestReviewStep_FixMode_FocusedVerificationContract(t *testing.T) {
 				os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
 				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 			}
-			j, _ := json.Marshal(cleanReviewFindings())
+			// Review call — full coverage of both changed files (the fixer
+			// added review-fix.txt), so the rereview completes in one turn.
+			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal, ReviewedPaths: fullReviewCoverage(t, dir, baseSHA)}
+			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
 		},
 	}
@@ -1153,7 +1164,11 @@ func TestReviewStep_RereviewTreatsFixRoundsAsPipelineAuthoredCode(t *testing.T) 
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
 					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 				}
-				j, _ := json.Marshal(cleanReviewFindings())
+				// The fixer added review-fix.txt, so the rereview's coverage
+				// record spans both changed files and completes in one turn.
+				findings := cleanReviewFindings()
+				findings.ReviewedPaths = []string{"feature.txt", "review-fix.txt"}
+				j, _ := json.Marshal(findings)
 				return &agent.Result{Output: j}, nil
 			},
 		}
@@ -1272,7 +1287,11 @@ func TestUncertifiedRange_PersistsThenFeedsNextInitialReview(t *testing.T) {
 		t.Fatalf("fixer commit did not persist range: %#v", persisted)
 	}
 
-	findingsJSON, _ := json.Marshal(cleanReviewFindings())
+	findings := cleanReviewFindings()
+	// The fixer committed review-fix.txt, so the next review's reviewable set
+	// has two files; full coverage keeps the canned clean review to one turn.
+	findings.ReviewedPaths = []string{"feature.txt", "review-fix.txt"}
+	findingsJSON, _ := json.Marshal(findings)
 	reviewAgent := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1631,7 +1650,11 @@ func TestReviewStep_PushedIgnorePatternsCannotSuppressPathInstructions(t *testin
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			j, _ := json.Marshal(cleanReviewFindings())
+			// The branch adds app.go and ignores *.txt, so the reviewable set
+			// is app.go alone; the canned clean review covers it in one turn.
+			findings := cleanReviewFindings()
+			findings.ReviewedPaths = []string{"app.go"}
+			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
 		},
 	}
@@ -1793,7 +1816,11 @@ func TestReviewStep_RereviewOffersRevertExitFromPriorRoundMachinery(t *testing.T
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
 					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 				}
-				j, _ := json.Marshal(cleanReviewFindings())
+				// The fixer added review-fix.txt, so the rereview's coverage
+				// record spans both changed files and completes in one turn.
+				findings := cleanReviewFindings()
+				findings.ReviewedPaths = []string{"feature.txt", "review-fix.txt"}
+				j, _ := json.Marshal(findings)
 				return &agent.Result{Output: j}, nil
 			},
 		}
@@ -2092,7 +2119,11 @@ func TestRereviewProvenanceIsNotContradictedByThePreviousRunsRounds(t *testing.T
 				os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
 				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
 			}
-			j, _ := json.Marshal(cleanReviewFindings())
+			// The fixer added review-fix.txt, so the rereview's coverage
+			// record spans both changed files and completes in one turn.
+			findings := cleanReviewFindings()
+			findings.ReviewedPaths = []string{"feature.txt", "review-fix.txt"}
+			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
 		},
 	}
