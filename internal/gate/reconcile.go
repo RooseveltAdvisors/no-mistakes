@@ -18,9 +18,10 @@ type StaleBranchReconciliation struct {
 }
 
 // StaleBranchPlan is the verdict of a non-mutating stale-branch inspection.
-// Planning checks containment or the exact run-owned-head policy exception
-// without touching any ref, so a caller can decide before it publishes anything;
-// applying the plan is the only step that archives and removes the branch.
+// Planning checks containment, recovery-anchor preservation, or the exact
+// run-owned-head policy exception without touching any ref, so a caller can
+// decide before it publishes anything; applying the plan is the only step that
+// archives and removes the branch.
 type StaleBranchPlan struct {
 	PreserveDescendantOf string
 	Reconcile            bool
@@ -37,7 +38,8 @@ type StaleBranchPlan struct {
 
 // ReconcileStaleBranch plans and immediately applies stale private gate branch
 // reconciliation. It removes the branch only after Git proves the live head
-// contains all of its content, or under the exact run-owned-head exception
+// contains all of its content or a recovery anchor preserves each private-only
+// commit that proof misses, or under the exact run-owned-head exception
 // described in docs/src/content/docs/concepts/gate-model.md.
 func ReconcileStaleBranch(ctx context.Context, gateDir, workDir, branch, liveHead, runOwnedHead string) (StaleBranchReconciliation, error) {
 	plan, err := PlanStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, runOwnedHead)
@@ -50,7 +52,9 @@ func ReconcileStaleBranch(ctx context.Context, gateDir, workDir, branch, liveHea
 // PlanStaleBranchReconciliation inspects a private gate branch and reports
 // whether it must be archived and removed before the live head can enter
 // through an ordinary push. It mutates no ref: outside the run-owned-head
-// exception, an unproven private head is refused before publication.
+// exception, a private head carrying a private-only commit that is neither
+// proven to survive nor preserved by a recovery anchor is refused before
+// publication.
 //
 // Rewritten histories require both stable per-file patch identities and final
 // tree survival. runOwnedHead is a policy exception, not containment evidence:
@@ -68,7 +72,8 @@ func PlanStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 // placed on the private mirror - Run.SubmittedHeadSHA and, once the run has
 // published, its durable Run.LastPushedSHA - and nothing else. Neither an
 // agent-created head nor any other recorded head is eligible; every other
-// mirror head still needs the full preservation proof.
+// mirror head still needs the full preservation proof or the recovery-anchor
+// preservation credit.
 func PlanMirrorPublicationReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead string, runOwnedHeads ...string) (StaleBranchPlan, error) {
 	return planStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, true, runOwnedHeads...)
 }

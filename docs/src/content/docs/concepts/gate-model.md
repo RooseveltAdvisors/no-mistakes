@@ -141,12 +141,12 @@ Reconciliation requires direct private branch and archive refs; symbolic refs,
 including dangling symbolic refs, are refused before containment checks. Ref
 creation and deletion use exact names without dereferencing and expected old
 values. Before deleting a reconciled branch ref, the gate archives its exact
-head at `refs/tags/no-mistakes-abandoned/<branch>/<sha>`. Outside Decision 41-A,
-unproven private content refuses before upstream publication, leaves the
-private branch untouched, and names every at-risk commit. An ancestor already
-supports an ordinary fast-forward. A gate head that is a newer descendant of
-the published head stays untouched, including through the detached worktree's
-shared branch refs.
+head at `refs/tags/no-mistakes-abandoned/<branch>/<sha>`. Outside Decision 41-A
+and the recovery-anchor credit above, unproven private content refuses before
+upstream publication, leaves the private branch untouched, and names every
+at-risk commit. An ancestor already supports an ordinary fast-forward. A gate
+head that is a newer descendant of the published head stays untouched,
+including through the detached worktree's shared branch refs.
 
 Correction and CI-repair recording persist the agent-created worktree head in
 the run and database without moving a branch ref shared with the gate. Repairs
