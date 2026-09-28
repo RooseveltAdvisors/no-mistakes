@@ -122,16 +122,18 @@ is unchanged, so a credited reconciliation still archives the exact private
 head before removing the branch ref. A commit no anchor reaches is still
 refused, and the refusal names every proof that would clear it.
 
-The credit scan is bounded **to the candidate commits**. Recovery anchors
-accumulate for the life of the gate, so the scan never materialises what every
-anchor can see: `git rev-list --no-walk` filters exactly the private-only
-candidates by reachability and returns at most one row per candidate, however
-large the anchor set grows. The deterministic bound is
-`maxRecoveryCandidates` in `internal/gate/reconcile.go`. Exceeding it is a
+The credit scan never walks what the anchors can see. Recovery anchors
+accumulate for the life of the gate, so the membership scan is one `git
+rev-list` of the candidates that excludes the live head as well as every
+anchor; because the candidates are private-only, that walk is bounded by the
+private-only range. Only credited commits are then attributed to the first
+anchor that reaches them. When no recovery anchor exists no credit is possible
+and the ordinary at-risk refusal is returned. Otherwise the deterministic bound
+is `maxRecoveryCandidates` in `internal/gate/reconcile.go`: exceeding it is a
 `RecoveryScanBoundedError` - an explicit refusal that names the bound and the
-clearing proofs - never a truncated answer. A scan that quietly returned the
-rows that fit would drop preservation credit for the rest and silently
-reintroduce the deadlock the credit exists to end.
+clearing proofs available to that call shape - never a truncated answer. A
+scan that quietly returned the rows that fit would drop preservation credit
+for the rest and silently reintroduce the deadlock the credit exists to end.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to a head the publishing run itself

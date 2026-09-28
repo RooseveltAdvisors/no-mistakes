@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -151,8 +152,13 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		// place. This is a preservation credit, not containment evidence: the
 		// surviving content still has to be proven by the checks above for any
 		// commit no anchor holds.
-		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, atRiskCommits)
+		satisfiers := reconcileSatisfiers(runOwnedHeads)
+		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, atRiskCommits)
 		if err != nil {
+			var bounded *RecoveryScanBoundedError
+			if errors.As(err, &bounded) {
+				return plan, fmt.Errorf("inspect recovery anchors for %s: %w. Clears on any of: %s", branchRef, err, joinSatisfiers(satisfiers[:len(satisfiers)-1]))
+			}
 			return plan, fmt.Errorf("inspect recovery anchors for %s: %w", branchRef, err)
 		}
 		remaining := make([]string, 0, len(atRiskCommits))
@@ -170,21 +176,11 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 				}
 				atRisk = append(atRisk, description)
 			}
-			// Name the satisfiers this call shape can actually take, so the refusal
-			// is actionable instead of a dead end.
-			satisfiers := []string{
-				"the live head descending from the private head (ancestry)",
-				"per-file patch-ID plus tree-survival proof (the content already landing in the live tree)",
-			}
-			if hasRunOwnedHead(runOwnedHeads) {
-				satisfiers = append(satisfiers, "the private head being exactly the publishing run's Run.SubmittedHeadSHA or Run.LastPushedSHA (Decision 41-A)")
-			}
-			satisfiers = append(satisfiers, "a refs/no-mistakes/recover/<run> recovery anchor reaching the commit")
 			return plan, fmt.Errorf(
 				"refusing to reconcile private mirror ref %s: %d at-risk commit(s) contain content absent from live head %s: %s. "+
 					"Clears on any of: %s",
 				branchRef, len(remaining), liveHead, strings.Join(atRisk, "; "),
-				strings.Join(satisfiers[:len(satisfiers)-1], "; ")+"; or "+satisfiers[len(satisfiers)-1],
+				joinSatisfiers(satisfiers),
 			)
 		}
 		plan.PreservedByRecovery = preserved
@@ -356,20 +352,29 @@ func listRecoveryAnchors(ctx context.Context, gateDir string) ([]recoveryAnchor,
 	return anchors, nil
 }
 
-// preservedByRecoveryAnchors reports, for each commit that still looks at risk,
-// a recovery anchor that keeps it reachable in the gate repository. Reachable
-// means reachable: the anchor's commit history contains the commit, so the
-// object and its history survive whatever happens to the private branch ref.
-//
-// This is a PRESERVATION credit only. It says nothing about whether the content
-// lands in the published tree, which the ancestry, patch-ID and tree-survival
-// checks above are responsible for proving. It exists so that the sanctioned
-// recover -> rerun -> push loop cannot deadlock against the very anchor that
-// loop wrote to declare the work preserved.
-// maxRecoveryCandidates bounds the recovery-anchor credit scan to the candidate
-// commits. The scan answers only about the commits it was handed, so its work
-// and its output are both bounded by this constant no matter how many recovery
-// anchors have accumulated or how much history they can see. Exceeding it is
+// reconcileSatisfiers names the proofs that can clear a reconciliation refusal
+// in this call shape, so the refusal is actionable instead of a dead end. The
+// recovery-anchor credit is always last.
+func reconcileSatisfiers(runOwnedHeads []string) []string {
+	satisfiers := []string{
+		"the live head descending from the private head (ancestry)",
+		"per-file patch-ID plus tree-survival proof (the content already landing in the live tree)",
+	}
+	if hasRunOwnedHead(runOwnedHeads) {
+		satisfiers = append(satisfiers, "the private head being exactly the publishing run's Run.SubmittedHeadSHA or Run.LastPushedSHA (Decision 41-A)")
+	}
+	return append(satisfiers, "a refs/no-mistakes/recover/<run> recovery anchor reaching the commit")
+}
+
+func joinSatisfiers(satisfiers []string) string {
+	if len(satisfiers) == 1 {
+		return satisfiers[0]
+	}
+	return strings.Join(satisfiers[:len(satisfiers)-1], "; ") + "; or " + satisfiers[len(satisfiers)-1]
+}
+
+// maxRecoveryCandidates bounds how many candidate commits the recovery-anchor
+// credit scan will answer for when recovery anchors exist. Exceeding it is
 // reported as RecoveryScanBoundedError and never degraded to a partial answer:
 // quietly returning what happened to fit would silently drop preservation
 // credit and reintroduce the deadlock this credit exists to prevent.
@@ -386,7 +391,7 @@ type RecoveryScanBoundedError struct {
 
 func (e *RecoveryScanBoundedError) Error() string {
 	return fmt.Sprintf(
-		"recovery-anchor credit scan bounded at %d candidate commits, but %d need checking: refusing rather than answering from a truncated scan. Clear it with the other satisfiers (ancestry, patch-ID plus tree-survival, or Decision 41-A's exact run-owned head) or reconcile the private range so fewer commits are private-only",
+		"recovery-anchor credit scan bounded at %d candidate commits, but %d need checking: refusing rather than answering from a truncated scan",
 		e.MaxCandidates, e.Candidates,
 	)
 }
@@ -396,30 +401,21 @@ func (e *RecoveryScanBoundedError) Error() string {
 // means reachable: the anchor's history contains the commit, so the object and
 // its history survive whatever happens to the private branch ref.
 //
-// The scan is bounded TO THE CANDIDATES. `rev-list --no-walk` keeps the
-// positive side to exactly the commits handed in and filters them by
-// reachability from the anchors, so it never materialises what every anchor can
-// see, and its answer is at most one row per candidate however large the
-// anchor set grows. Anchors accumulate for the life of the gate, so a scan that
-// walked their reachability would make unrelated pushes progressively slower.
+// The membership scan excludes liveHead as well as the anchors. The candidates
+// are private-only commits, so that walk is bounded by the private-only range
+// rather than by the history the anchors or the live branch can see; anchors
+// accumulate for the life of the gate. Attribution then probes anchors only for
+// the credited commits, stopping at the first anchor that covers each.
 //
 // This is a PRESERVATION credit only. It says nothing about whether the content
 // lands in the published tree, which the ancestry, patch-ID and tree-survival
 // checks are responsible for proving. It exists so that the sanctioned
 // recover -> rerun -> push loop cannot deadlock against the very anchor that
 // loop wrote to declare the work preserved.
-func preservedByRecoveryAnchors(ctx context.Context, gateDir string, commits []string) (map[string]string, error) {
+func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, commits []string) (map[string]string, error) {
 	preserved := make(map[string]string)
 	if len(commits) == 0 {
 		return preserved, nil
-	}
-	// The bound is checked before any Git work so an oversized request is
-	// refused outright rather than half-answered.
-	if len(commits) > maxRecoveryCandidates {
-		return nil, &RecoveryScanBoundedError{
-			Candidates:    len(commits),
-			MaxCandidates: maxRecoveryCandidates,
-		}
 	}
 	anchors, err := listRecoveryAnchors(ctx, gateDir)
 	if err != nil {
@@ -428,6 +424,12 @@ func preservedByRecoveryAnchors(ctx context.Context, gateDir string, commits []s
 	if len(anchors) == 0 {
 		return preserved, nil
 	}
+	if len(commits) > maxRecoveryCandidates {
+		return nil, &RecoveryScanBoundedError{
+			Candidates:    len(commits),
+			MaxCandidates: maxRecoveryCandidates,
+		}
+	}
 	anchorHeads := make([]string, 0, len(anchors))
 	for _, anchor := range anchors {
 		anchorHeads = append(anchorHeads, anchor.head)
@@ -435,9 +437,8 @@ func preservedByRecoveryAnchors(ctx context.Context, gateDir string, commits []s
 
 	// One scan: the candidates NO anchor reaches. Its complement is preserved.
 	args := make([]string, 0, len(commits)+len(anchorHeads)+2)
-	args = append(args, "--no-walk=unsorted")
 	args = append(args, commits...)
-	args = append(args, "--not")
+	args = append(args, "--not", liveHead)
 	args = append(args, anchorHeads...)
 	unreached, err := commitList(ctx, gateDir, args...)
 	if err != nil {
@@ -451,16 +452,10 @@ func preservedByRecoveryAnchors(ctx context.Context, gateDir string, commits []s
 		if unreachedSet[commit] {
 			continue
 		}
-		// Attribution only, for the handful of credited commits, and it stops at
-		// the first anchor that covers each one. Like the scan above it filters
-		// candidates rather than walking anchor history.
+		// Attribution only, for the credited commits, stopping at the first
+		// anchor that covers each one.
 		for _, anchor := range anchors {
-			args := []string{"--no-walk=unsorted", commit, "--not", anchor.head}
-			covered, err := commitList(ctx, gateDir, args...)
-			if err != nil {
-				return nil, err
-			}
-			if len(covered) == 0 {
+			if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", commit, anchor.head); err == nil {
 				preserved[commit] = anchor.ref
 				break
 			}
@@ -469,6 +464,16 @@ func preservedByRecoveryAnchors(ctx context.Context, gateDir string, commits []s
 	return preserved, nil
 }
 
+// privateCommitsAbsentFromLive names private-only commits lacking matching
+// per-file patches, or the entire private-only range when final-tree survival
+// cannot be proven.
+//
+// The private side is computed first so the live scan can be bounded to the
+// paths the private commits actually touch. Comparison stops at the first
+// unmatched patch within each commit, but visits every private-only commit.
+// A rebased live head otherwise carries every default-branch
+// commit since the merge base, and hashing each of those files would cost
+// thousands of git invocations to answer a question about a handful of paths.
 func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privateHead string) ([]string, error) {
 	privateOnly, err := commitList(ctx, repoDir, "--right-only", liveHead+"..."+privateHead)
 	if err != nil {
