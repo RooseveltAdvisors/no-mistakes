@@ -151,7 +151,7 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		// place. This is a preservation credit, not containment evidence: the
 		// surviving content still has to be proven by the checks above for any
 		// commit no anchor holds.
-		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, atRiskCommits)
+		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, atRiskCommits)
 		if err != nil {
 			return plan, fmt.Errorf("inspect recovery anchors for %s: %w", branchRef, err)
 		}
@@ -366,10 +366,60 @@ func listRecoveryAnchors(ctx context.Context, gateDir string) ([]recoveryAnchor,
 // checks above are responsible for proving. It exists so that the sanctioned
 // recover -> rerun -> push loop cannot deadlock against the very anchor that
 // loop wrote to declare the work preserved.
-func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, commits []string) (map[string]string, error) {
+// maxRecoveryCandidates bounds the recovery-anchor credit scan to the candidate
+// commits. The scan answers only about the commits it was handed, so its work
+// and its output are both bounded by this constant no matter how many recovery
+// anchors have accumulated or how much history they can see. Exceeding it is
+// reported as RecoveryScanBoundedError and never degraded to a partial answer:
+// quietly returning what happened to fit would silently drop preservation
+// credit and reintroduce the deadlock this credit exists to prevent.
+const maxRecoveryCandidates = 512
+
+// RecoveryScanBoundedError reports that the recovery-anchor credit scan could
+// not run within its deterministic bound. It is a refusal, not a verdict: no
+// commit is credited and none is declared at risk, because neither could be
+// determined.
+type RecoveryScanBoundedError struct {
+	Candidates    int
+	MaxCandidates int
+}
+
+func (e *RecoveryScanBoundedError) Error() string {
+	return fmt.Sprintf(
+		"recovery-anchor credit scan bounded at %d candidate commits, but %d need checking: refusing rather than answering from a truncated scan. Clear it with the other satisfiers (ancestry, patch-ID plus tree-survival, or Decision 41-A's exact run-owned head) or reconcile the private range so fewer commits are private-only",
+		e.MaxCandidates, e.Candidates,
+	)
+}
+
+// preservedByRecoveryAnchors reports, for each candidate commit only, a
+// recovery anchor that keeps it reachable in the gate repository. Reachable
+// means reachable: the anchor's history contains the commit, so the object and
+// its history survive whatever happens to the private branch ref.
+//
+// The scan is bounded TO THE CANDIDATES. `rev-list --no-walk` keeps the
+// positive side to exactly the commits handed in and filters them by
+// reachability from the anchors, so it never materialises what every anchor can
+// see, and its answer is at most one row per candidate however large the
+// anchor set grows. Anchors accumulate for the life of the gate, so a scan that
+// walked their reachability would make unrelated pushes progressively slower.
+//
+// This is a PRESERVATION credit only. It says nothing about whether the content
+// lands in the published tree, which the ancestry, patch-ID and tree-survival
+// checks are responsible for proving. It exists so that the sanctioned
+// recover -> rerun -> push loop cannot deadlock against the very anchor that
+// loop wrote to declare the work preserved.
+func preservedByRecoveryAnchors(ctx context.Context, gateDir string, commits []string) (map[string]string, error) {
 	preserved := make(map[string]string)
 	if len(commits) == 0 {
 		return preserved, nil
+	}
+	// The bound is checked before any Git work so an oversized request is
+	// refused outright rather than half-answered.
+	if len(commits) > maxRecoveryCandidates {
+		return nil, &RecoveryScanBoundedError{
+			Candidates:    len(commits),
+			MaxCandidates: maxRecoveryCandidates,
+		}
 	}
 	anchors, err := listRecoveryAnchors(ctx, gateDir)
 	if err != nil {
@@ -382,20 +432,35 @@ func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, c
 	for _, anchor := range anchors {
 		anchorHeads = append(anchorHeads, anchor.head)
 	}
-	anchored, err := commitList(ctx, gateDir, append(anchorHeads, "--not", liveHead)...)
+
+	// One scan: the candidates NO anchor reaches. Its complement is preserved.
+	args := make([]string, 0, len(commits)+len(anchorHeads)+2)
+	args = append(args, "--no-walk=unsorted")
+	args = append(args, commits...)
+	args = append(args, "--not")
+	args = append(args, anchorHeads...)
+	unreached, err := commitList(ctx, gateDir, args...)
 	if err != nil {
 		return nil, err
 	}
-	anchoredSet := make(map[string]bool, len(anchored))
-	for _, commit := range anchored {
-		anchoredSet[commit] = true
+	unreachedSet := make(map[string]bool, len(unreached))
+	for _, commit := range unreached {
+		unreachedSet[commit] = true
 	}
 	for _, commit := range commits {
-		if !anchoredSet[commit] {
+		if unreachedSet[commit] {
 			continue
 		}
+		// Attribution only, for the handful of credited commits, and it stops at
+		// the first anchor that covers each one. Like the scan above it filters
+		// candidates rather than walking anchor history.
 		for _, anchor := range anchors {
-			if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", commit, anchor.head); err == nil {
+			args := []string{"--no-walk=unsorted", commit, "--not", anchor.head}
+			covered, err := commitList(ctx, gateDir, args...)
+			if err != nil {
+				return nil, err
+			}
+			if len(covered) == 0 {
 				preserved[commit] = anchor.ref
 				break
 			}
@@ -404,16 +469,6 @@ func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, c
 	return preserved, nil
 }
 
-// privateCommitsAbsentFromLive names private-only commits lacking matching
-// per-file patches, or the entire private-only range when final-tree survival
-// cannot be proven.
-//
-// The private side is computed first so the live scan can be bounded to the
-// paths the private commits actually touch. Comparison stops at the first
-// unmatched patch within each commit, but visits every private-only commit.
-// A rebased live head otherwise carries every default-branch
-// commit since the merge base, and hashing each of those files would cost
-// thousands of git invocations to answer a question about a handful of paths.
 func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privateHead string) ([]string, error) {
 	privateOnly, err := commitList(ctx, repoDir, "--right-only", liveHead+"..."+privateHead)
 	if err != nil {

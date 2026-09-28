@@ -2,9 +2,12 @@ package gate
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -777,13 +780,77 @@ func TestPlanStaleBranchReconciliationIgnoresSymbolicRecoveryAnchors(t *testing.
 func TestPreservedByRecoveryAnchorsWithoutAnchorsCreditsNothing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, gateDir, privateHead, _, liveHead := setupAnchoredPrivateBranch(t)
+	_, gateDir, privateHead, _, _ := setupAnchoredPrivateBranch(t)
 
-	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, []string{privateHead})
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, []string{privateHead})
 	if err != nil {
 		t.Fatalf("preservedByRecoveryAnchors: %v", err)
 	}
 	if len(preserved) != 0 {
 		t.Fatalf("no anchors existed but commits were credited: %+v", preserved)
+	}
+}
+
+// The credit scan is bounded to the candidates and says so when it cannot
+// answer within that bound. Exhaustion is an explicit refusal, never a silent
+// empty result: returning what happened to fit would drop preservation credit
+// for the rest and quietly reintroduce the deadlock the credit exists to end.
+func TestPreservedByRecoveryAnchorsRefusesOutOfBoundsScanExplicitly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, gateDir, _, _, _ := setupAnchoredPrivateBranch(t)
+
+	candidates := make([]string, maxRecoveryCandidates+1)
+	for i := range candidates {
+		candidates[i] = fmt.Sprintf("%040d", i)
+	}
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, candidates)
+	if err == nil {
+		t.Fatalf("oversized scan answered instead of refusing: %+v", preserved)
+	}
+	if preserved != nil && len(preserved) != 0 {
+		t.Fatalf("oversized scan returned partial credit, which is the silent degradation this must never do: %+v", preserved)
+	}
+	var bounded *RecoveryScanBoundedError
+	if !errors.As(err, &bounded) {
+		t.Fatalf("oversized scan did not report RecoveryScanBoundedError: %v", err)
+	}
+	if bounded.MaxCandidates != maxRecoveryCandidates || bounded.Candidates != len(candidates) {
+		t.Fatalf("bounded error named the wrong counts: %+v", bounded)
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"bounded at",
+		strconv.Itoa(maxRecoveryCandidates),
+		"refusing rather than answering from a truncated scan",
+		"patch-ID",
+		"Decision 41-A",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("bounded refusal is not actionable, missing %q in: %v", want, err)
+		}
+	}
+	t.Logf("Explicit bounded refusal: %v", err)
+}
+
+// The scan answers only about the candidates it is handed: an anchor holding
+// unrelated history never changes the answer for a candidate it cannot reach.
+func TestPreservedByRecoveryAnchorsIsBoundedToTheCandidateCommits(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work, gateDir, privateHead, _, liveHead := setupAnchoredPrivateBranch(t)
+
+	// Stage an unrelated history in the gate and anchor it: the candidates are
+	// not descendants of it, so it must credit nothing.
+	reconcileGit(t, gateDir, "fetch", work, liveHead+":refs/heads/unrelated")
+	anchor := "refs/no-mistakes/recover/01MUNRELATEDANCHOR0000000000000"
+	reconcileGit(t, gateDir, "update-ref", anchor, reconcileGit(t, gateDir, "rev-parse", "refs/heads/unrelated"))
+
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, []string{privateHead})
+	if err != nil {
+		t.Fatalf("preservedByRecoveryAnchors: %v", err)
+	}
+	if len(preserved) != 0 {
+		t.Fatalf("unrelated anchor credited a candidate it cannot reach: %+v", preserved)
 	}
 }
