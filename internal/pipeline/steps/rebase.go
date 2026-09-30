@@ -60,13 +60,16 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// when the remote carries an out-of-band commit - silently clobbering it
 	// (the original #281/#305 hazard, in the force-push path). Leaving it stale is
 	// what lets the push step's content check catch that case.
+	var branchFetchErr error
 	if !forcePush && branch != "" && branch != defaultBranch {
 		if strings.TrimSpace(sctx.Repo.ForkURL) == "" {
 			if err := fetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
 				sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", branch, err))
+				branchFetchErr = err
 			}
 		} else if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, pushRemote, branch, branchTarget); err != nil {
 			sctx.LogFile(fmt.Sprintf("warning: could not fetch %s: %v", branchTarget, err))
+			branchFetchErr = err
 		}
 	}
 
@@ -99,12 +102,18 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}, nil
 	}
 	if !forcePush && branch != "" && branch != defaultBranch {
-		remoteSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", branchTarget+"^{commit}")
-		if err != nil {
-			// The tracking ref is unreadable while the branch fetch above only
-			// warns on failure, so the head is resolved from the remote itself:
-			// a branch that no longer exists has no lineage to compare and the
-			// default targets stand, while an existing head is imported
+		remoteSHA := ""
+		if branchFetchErr == nil {
+			if sha, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", branchTarget+"^{commit}"); err == nil {
+				remoteSHA = sha
+			}
+		}
+		if remoteSHA == "" {
+			// The tracking ref cannot be trusted for this comparison - the
+			// branch fetch above failed (leaving a possibly stale ref) or the
+			// ref is unreadable - so the head is resolved from the remote
+			// itself: a branch that no longer exists has no lineage to compare
+			// and the default targets stand, while an existing head is imported
 			// read-only for the comparison, and a head that still cannot be
 			// compared fails the step instead of either target being picked
 			// silently.

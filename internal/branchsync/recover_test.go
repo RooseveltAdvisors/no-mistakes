@@ -1307,6 +1307,49 @@ func TestInspectKeepsAnAheadRelationWhenNamingUnincorporatedGateCommits(t *testi
 	}
 }
 
+func TestInspectKeepsKeepLocalWhenTheLocalHeadCarriesTheGateTip(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	// The gate advances beyond the recorded head while the local head already
+	// carries that gate tip plus a follow-up commit, so keep-local would move
+	// the gate ref to a superset and discard nothing.
+	tree := mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}")
+	gateTip := mustRun(t, f.gate, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit-tree", tree, "-p", f.preserved, "-m", "later gate tip")
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", gateTip)
+
+	mustRun(t, f.local, "fetch", "--no-tags", f.gate, "refs/heads/feature/recover:refs/no-mistakes/recovery-test")
+	mustRun(t, f.local, "reset", "--hard", gateTip)
+	mustWrite(t, filepath.Join(f.local, "local.txt"), "local\n")
+	mustRun(t, f.local, "add", "local.txt")
+	mustRun(t, f.local, "commit", "-m", "local follow-up")
+
+	// A missing older terminal head forces the same preflight that previously
+	// claimed keep-local would discard the gate lineage.
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, strings.Repeat("f", 40)); err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunHeadSHA(recorded.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunStatusWithVerifiedHead(recorded.ID, types.RunCancelled, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.InspectCached(f.ctx)
+	if state.Safety != "blocked_recover_preserved_head_missing" {
+		t.Fatalf("safety = %q, want blocked_recover_preserved_head_missing: %#v", state.Safety, state)
+	}
+	assertKeepLocalRecoveryOffer(t, state)
+	if strings.Contains(state.Error, "not incorporated") {
+		t.Fatalf("recovery claimed a discard that cannot happen: %s", state.Error)
+	}
+}
+
 func TestInspectDoesNotOfferKeepLocalForUnverifiedMissingHead(t *testing.T) {
 	t.Parallel()
 

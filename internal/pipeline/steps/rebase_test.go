@@ -407,6 +407,77 @@ func TestRebaseStep_RewrittenHeadKeepsRemoteLineageContainingTheRecordedBase(t *
 	}
 }
 
+func TestRebaseStep_FailedFetchComparesTheLiveRemoteHead(t *testing.T) {
+	t.Parallel()
+
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init", "-b", "main")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	writeFixtureFile(t, dir, "base.txt", "base\n")
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "base")
+	baseCommit := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	writeFixtureFile(t, dir, "feat.txt", "v1\n")
+	gitCmd(t, dir, "add", "feat.txt")
+	gitCmd(t, dir, "commit", "-m", "feature v1")
+	staleHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	gitCmd(t, dir, "checkout", "main")
+	writeFixtureFile(t, dir, "main.txt", "new main\n")
+	gitCmd(t, dir, "add", "main.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	// Another clone moves the live remote head past what this clone last saw.
+	other := t.TempDir()
+	gitCmd(t, other, "clone", "--branch", "feature", upstream, ".")
+	gitCmd(t, other, "config", "user.name", "test")
+	gitCmd(t, other, "config", "user.email", "test@test.com")
+	writeFixtureFile(t, other, "other.txt", "remote\n")
+	gitCmd(t, other, "add", "other.txt")
+	gitCmd(t, other, "commit", "-m", "remote lineage")
+	liveRemoteHead := gitCmd(t, other, "rev-parse", "HEAD")
+	gitCmd(t, other, "push", "origin", "feature")
+
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", "main")
+	localHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	// Hold the tracking ref's lockfile so the branch fetch fails while the
+	// stale origin/feature ref stays readable and the live head exists only on
+	// the remote.
+	if err := os.WriteFile(filepath.Join(dir, ".git", "refs", "remotes", "origin", "feature.lock"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "origin/feature"); got != staleHead {
+		t.Fatalf("origin/feature = %s, want the stale %s", got, staleHead)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseCommit, localHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("rebase after a failed branch fetch: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected conflict while preserving the live remote lineage: %s", outcome.Findings)
+	}
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	if !isAncestor(context.Background(), dir, liveRemoteHead, head) {
+		t.Fatalf("rebased head %s does not contain the live remote head %s (stale tracking ref was %s); git log:\n%s", head, liveRemoteHead, staleHead, gitCmd(t, dir, "log", "--oneline"))
+	}
+}
+
 func TestRebaseStep_UsesConfiguredPRBaseBranch(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()

@@ -2278,6 +2278,20 @@ func (s *Service) unincorporatedGateHeadMessage(ctx context.Context, state *Stat
 		return "", false
 	}
 
+	// Keep-local moves the gate ref to the local head via compare-and-swap, so
+	// when the local head already carries the gate tip nothing on the gate is
+	// discarded and the refusal below would name a loss that cannot happen.
+	// Containment is proven read-only here; when it cannot be proven in a store
+	// holding both commits, the refusal stands.
+	if strings.TrimSpace(state.Local.Head) != "" && objectExists(ctx, s.workDir(), state.Local.Head) {
+		if !objectExists(ctx, s.workDir(), gateHead) {
+			_ = git.FetchRemoteRef(ctx, s.workDir(), s.GateDir, gateBranch, gateHead)
+		}
+		if objectExists(ctx, s.workDir(), gateHead) && isAncestor(ctx, s.workDir(), gateHead, state.Local.Head) {
+			return "", false
+		}
+	}
+
 	// Prefer the gate's object store, but use the invoking worktree when a
 	// documented read-only anchor fetch made the recorded head available there
 	// before the gate branch itself was reconciled. When the two heads never met
