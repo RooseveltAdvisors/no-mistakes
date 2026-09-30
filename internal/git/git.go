@@ -587,6 +587,20 @@ func PushWithOptionsSkippingHooks(ctx context.Context, dir, remote, ref, expecte
 	return pushSourceWithOptions(ctx, dir, remote, "HEAD", ref, expectedSHA, forceWithLease, pushOptions, true)
 }
 
+// NonFastForwardError reports a rejected ordinary push before send-pack opens
+// the receive-pack session. Managed gate hooks can close that session while
+// refusing the update, which otherwise makes Git surface only SIGPIPE.
+type NonFastForwardError struct {
+	Remote     string
+	Ref        string
+	RemoteHead string
+	SourceHead string
+}
+
+func (e *NonFastForwardError) Error() string {
+	return fmt.Sprintf("push rejected: non-fast-forward: %s is at %s, which is not an ancestor of source %s; managed validation branches do not allow force-pushes or gate-reference edits; preserve the remote head by starting a fresh run under a new branch name (for example, `git switch -c <new-branch>` from %s)", safeurl.Redact(e.Remote), e.RemoteHead, e.Ref, e.SourceHead)
+}
+
 func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expectedSHA string, forceWithLease bool, pushOptions []string, skipHooks bool) error {
 	// On an up-to-date push, send-pack sends no ref update but still writes the
 	// push options and a closing flush; receive-pack exits on the empty update
@@ -595,6 +609,11 @@ func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expect
 	// the push gives the same result without the race.
 	if len(pushOptions) > 0 && remoteRefAt(ctx, dir, remote, ref, source) {
 		return nil
+	}
+	if !forceWithLease {
+		if err := checkNonFastForward(ctx, dir, remote, source, ref); err != nil {
+			return err
+		}
 	}
 	args := []string{"push"}
 	if skipHooks {
@@ -614,6 +633,60 @@ func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expect
 	args = append(args, source+":"+ref)
 	_, err := Run(ctx, dir, args...)
 	return err
+}
+
+// checkNonFastForward compares the exact remote ref with the immutable source
+// selected for a push. It imports a missing remote object by its exact ref so
+// the ancestry check remains read-only and works when the source repository
+// has not fetched that ref before. The final push still races with remote
+// updates normally; this check's purpose is to report a known non-fast-forward
+// with its actual reason before a managed hook can collapse it into SIGPIPE.
+func checkNonFastForward(ctx context.Context, dir, remote, source, ref string) error {
+	sourceHead, err := ResolveRef(ctx, dir, source)
+	if err != nil {
+		return fmt.Errorf("resolve push source %s before non-fast-forward check: %w", source, err)
+	}
+	remoteHead, err := LsRemote(ctx, dir, remote, ref)
+	if err != nil {
+		return fmt.Errorf("read remote %s for non-fast-forward check: %w", ref, err)
+	}
+	if remoteHead == "" || remoteHead == sourceHead {
+		return nil
+	}
+
+	ancestor, err := isAncestor(ctx, dir, remoteHead, sourceHead)
+	if err != nil {
+		// The exact remote head may not be present in this clone. Fetch only
+		// that object, and verify that the ref did not move while doing so.
+		if err := FetchRemoteRef(ctx, dir, remote, ref, remoteHead); err != nil {
+			return fmt.Errorf("import remote %s at %s for non-fast-forward check: %w", ref, remoteHead, err)
+		}
+		ancestor, err = isAncestor(ctx, dir, remoteHead, sourceHead)
+		if err != nil {
+			return fmt.Errorf("verify ancestry of remote %s at %s against source %s: %w", ref, remoteHead, sourceHead, err)
+		}
+	}
+	if ancestor {
+		return nil
+	}
+	return &NonFastForwardError{
+		Remote:     remote,
+		Ref:        ref,
+		RemoteHead: remoteHead,
+		SourceHead: sourceHead,
+	}
+}
+
+func isAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	_, err := Run(ctx, dir, "merge-base", "--is-ancestor", ancestor, descendant)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 // remoteRefAt reports whether remote's exact ref already points at source's

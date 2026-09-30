@@ -257,6 +257,54 @@ func TestPush(t *testing.T) {
 	}
 }
 
+func TestPushReportsNonFastForwardWithRecoveryRoute(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatalf("initial Push failed: %v", err)
+	}
+
+	// Advance the remote from a separate clone, then create a divergent local
+	// commit from the old source head. This is the rebased-gate shape: the
+	// remote has a head the local source does not incorporate.
+	writer := filepath.Join(t.TempDir(), "writer")
+	run(t, t.TempDir(), "git", "clone", "--branch", "main", bare, writer)
+	run(t, writer, "git", "config", "user.email", "writer@test.com")
+	run(t, writer, "git", "config", "user.name", "Writer")
+	writeFile(t, filepath.Join(writer, "remote.txt"), "remote\n")
+	run(t, writer, "git", "add", "remote.txt")
+	run(t, writer, "git", "commit", "-m", "remote lineage")
+	run(t, writer, "git", "push", "origin", "HEAD:refs/heads/main")
+	remoteHead := run(t, bare, "git", "rev-parse", "refs/heads/main")
+
+	writeFile(t, filepath.Join(src, "local.txt"), "local\n")
+	run(t, src, "git", "add", "local.txt")
+	run(t, src, "git", "commit", "-m", "rebased local lineage")
+	sourceHead := run(t, src, "git", "rev-parse", "HEAD")
+
+	err := Push(ctx, src, "dest", "refs/heads/main", "", false)
+	if err == nil {
+		t.Fatal("divergent ordinary push unexpectedly succeeded")
+	}
+	message := err.Error()
+	for _, want := range []string{"non-fast-forward", remoteHead, "new branch name", "git switch -c <new-branch>"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("push error missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(message, "broken pipe") || strings.Contains(message, "signal:") {
+		t.Fatalf("push error hid the rejection reason: %v", err)
+	}
+	if got := run(t, bare, "git", "rev-parse", "refs/heads/main"); got != remoteHead {
+		t.Fatalf("rejected push moved remote from %s to %s (source was %s)", remoteHead, got, sourceHead)
+	}
+}
+
 func TestPushWithOptionsForwardsPushOptions(t *testing.T) {
 	ctx := context.Background()
 	src := initTestRepo(t)

@@ -1244,6 +1244,8 @@ func TestAxiSyncAdoptPublishedRebasedLane(t *testing.T) {
 
 	if err := git.Push(context.Background(), f.local, f.gate, "refs/heads/feature/recover", "", false); err == nil {
 		t.Fatal("unforced push to the stale gate unexpectedly succeeded")
+	} else if !strings.Contains(err.Error(), "non-fast-forward") {
+		t.Fatalf("stale gate push hid its rejection reason: %v", err)
 	}
 	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
 		t.Fatalf("rejected gate push moved lane to %s, want pre-rebase %s", got, f.preserved)

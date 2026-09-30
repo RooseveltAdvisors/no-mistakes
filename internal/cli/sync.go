@@ -408,6 +408,9 @@ func humanSyncSummary(state branchsync.State) string {
 		if state.Safety == "blocked_recover_preserved_head_missing" {
 			return "run ended without a recoverable preserved head; recover custody with `no-mistakes sync --recover --keep-local` to keep the current local head"
 		}
+		if state.Safety == "blocked_recover_unincorporated_remote_head" {
+			return "the gate carries unincorporated commits; preserve them under a new branch name before starting a fresh run"
+		}
 		return "pipeline fix is not pushed yet; do not make local follow-up commits"
 	case branchsync.StateCustodyReturned:
 		if state.Safety == "recovery_required" && state.NextAction != nil {
