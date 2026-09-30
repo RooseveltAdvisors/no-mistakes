@@ -2214,6 +2214,12 @@ func (s *Service) classifyPipelineOwned(ctx context.Context, state *State, run *
 	if terminalRunStatus(run.Status) {
 		_, _, anyMissing, allEligible := s.missingHeadKeepLocalRuns(ctx, state, run)
 		if anyMissing {
+			if message, ok := s.unincorporatedGateHeadMessage(ctx, state, run); ok {
+				state.Safety = "blocked_recover_unincorporated_remote_head"
+				state.Error = message
+				state.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+				return
+			}
 			if allEligible {
 				state.Safety = "blocked_recover_preserved_head_missing"
 				state.Error = "a stranded run's recorded pipeline head is not available in the invoking worktree or local gate; recover custody by keeping the current local head, which discards the missing preserved commits"
@@ -2254,6 +2260,57 @@ func (s *Service) classifyPipelineOwned(ctx context.Context, state *State, run *
 	state.Safety = "blocked_pipeline_owned"
 	state.Error = activeMessage
 	state.NextAction = &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+}
+
+// unincorporatedGateHeadMessage identifies the specific recovery dead end in
+// which a stranded run is missing some preserved evidence while the live gate
+// branch has a different lineage from the selected run head. Keep-local would
+// discard that gate-only lineage, and treating the case as a generic missing
+// head loses the only useful remediation detail. This is read-only evidence:
+// it never moves the gate ref or the invoking branch.
+func (s *Service) unincorporatedGateHeadMessage(ctx context.Context, state *State, run *db.Run) (string, bool) {
+	if state == nil || run == nil || strings.TrimSpace(run.HeadSHA) == "" || strings.TrimSpace(s.GateDir) == "" {
+		return "", false
+	}
+	gateBranch := "refs/heads/" + state.Local.Branch
+	gateHead, exists, err := git.ExactRefTarget(ctx, s.GateDir, gateBranch)
+	if err != nil || !exists || gateHead == "" || gateHead == run.HeadSHA {
+		return "", false
+	}
+
+	// Prefer the gate's object store, but use the invoking worktree when a
+	// documented read-only anchor fetch made the recorded head available there
+	// before the gate branch itself was reconciled. No ref is created here.
+	compareDir := s.GateDir
+	if !objectExists(ctx, compareDir, run.HeadSHA) || !objectExists(ctx, compareDir, gateHead) {
+		compareDir = s.workDir()
+	}
+	if !objectExists(ctx, compareDir, run.HeadSHA) || !objectExists(ctx, compareDir, gateHead) {
+		return "", false
+	}
+
+	remoteOnly, err := git.Run(ctx, compareDir, "rev-list", "--right-only", "--format=%H %s", "--no-commit-header", run.HeadSHA+"..."+gateHead)
+	if err != nil || strings.TrimSpace(remoteOnly) == "" {
+		return "", false
+	}
+	lines := strings.Split(strings.TrimSpace(remoteOnly), "\n")
+	const maxShown = 8
+	shown := lines
+	if len(shown) > maxShown {
+		shown = shown[:maxShown]
+	}
+	commitList := strings.Join(shown, "; ")
+	if len(lines) > maxShown {
+		commitList += fmt.Sprintf("; ... and %d more", len(lines)-maxShown)
+	}
+
+	if state.Relation != RelationDiverged {
+		state.Relation = relationBetween(ctx, compareDir, state.Local.Head, run.HeadSHA)
+	}
+	return fmt.Sprintf(
+		"the gate/remote head %s carries %d commit(s) not incorporated by recorded pipeline head %s: %s; do not use --recover --keep-local or force-push this branch because that would discard the unincorporated lineage; preserve it under a new branch name from %s, then start a fresh validation run; no files or refs were changed",
+		gateHead, len(lines), run.HeadSHA, commitList, gateHead,
+	), true
 }
 
 type recoverySourceProof struct {
