@@ -598,7 +598,7 @@ type NonFastForwardError struct {
 }
 
 func (e *NonFastForwardError) Error() string {
-	return fmt.Sprintf("push rejected: non-fast-forward: %s is at %s, which is not an ancestor of source %s; managed validation branches do not allow force-pushes or gate-reference edits; preserve the remote head by starting a fresh run under a new branch name (for example, `git switch -c <new-branch>` from %s)", safeurl.Redact(e.Remote), e.RemoteHead, e.Ref, e.SourceHead)
+	return fmt.Sprintf("push rejected: non-fast-forward: %s ref %s is at %s, which is not an ancestor of the pushed source %s; managed validation branches do not allow force-pushes or gate-reference edits; preserve the remote head by starting a fresh run under a new branch name (for example, `git switch -c <new-branch>` from %s)", safeurl.Redact(e.Remote), e.Ref, e.RemoteHead, e.SourceHead, e.SourceHead)
 }
 
 func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expectedSHA string, forceWithLease bool, pushOptions []string, skipHooks bool) error {

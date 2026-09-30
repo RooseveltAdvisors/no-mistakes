@@ -2280,10 +2280,21 @@ func (s *Service) unincorporatedGateHeadMessage(ctx context.Context, state *Stat
 
 	// Prefer the gate's object store, but use the invoking worktree when a
 	// documented read-only anchor fetch made the recorded head available there
-	// before the gate branch itself was reconciled. No ref is created here.
+	// before the gate branch itself was reconciled. When the two heads never met
+	// in one store - the recorded head is a worktree-only anchor and the live
+	// gate tip arrived from another clone - the exact gate tip is imported
+	// read-only into the invoking worktree so the lineage can still be named.
+	// No caller-owned ref is created or moved here.
 	compareDir := s.GateDir
 	if !objectExists(ctx, compareDir, run.HeadSHA) || !objectExists(ctx, compareDir, gateHead) {
 		compareDir = s.workDir()
+	}
+	if !objectExists(ctx, compareDir, run.HeadSHA) || !objectExists(ctx, compareDir, gateHead) {
+		if objectExists(ctx, s.workDir(), run.HeadSHA) && !objectExists(ctx, s.workDir(), gateHead) {
+			if err := git.FetchRemoteRef(ctx, s.workDir(), s.GateDir, gateBranch, gateHead); err == nil {
+				compareDir = s.workDir()
+			}
+		}
 	}
 	if !objectExists(ctx, compareDir, run.HeadSHA) || !objectExists(ctx, compareDir, gateHead) {
 		return "", false

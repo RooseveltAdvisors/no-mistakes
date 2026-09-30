@@ -292,7 +292,14 @@ func TestPushReportsNonFastForwardWithRecoveryRoute(t *testing.T) {
 		t.Fatal("divergent ordinary push unexpectedly succeeded")
 	}
 	message := err.Error()
-	for _, want := range []string{"non-fast-forward", remoteHead, "new branch name", "git switch -c <new-branch>"} {
+	for _, want := range []string{
+		"non-fast-forward",
+		remoteHead,
+		"new branch name",
+		"git switch -c <new-branch>",
+		"ref refs/heads/main is at " + remoteHead,
+		"not an ancestor of the pushed source " + sourceHead,
+	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("push error missing %q: %v", want, err)
 		}

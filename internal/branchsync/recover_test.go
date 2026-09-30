@@ -1205,6 +1205,57 @@ func TestInspectNamesUnincorporatedGateLineageDuringMissingRecovery(t *testing.T
 	}
 }
 
+func TestInspectNamesUnincorporatedGateLineageFromAWorktreeOnlyAnchor(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	// The recorded head becomes a local anchor that never reached the gate,
+	// while the gate's pipeline commits were never fetched into the invoking
+	// worktree, so the two heads do not meet in one object store. The local
+	// head moves on to a diverged commit of its own.
+	mustRun(t, f.local, "reset", "--hard", f.submitted)
+	mustWrite(t, filepath.Join(f.local, "anchor.txt"), "anchor\n")
+	mustRun(t, f.local, "add", "anchor.txt")
+	mustRun(t, f.local, "commit", "-m", "local anchor")
+	anchor := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.local, "reset", "--hard", f.submitted)
+	mustWrite(t, filepath.Join(f.local, "local.txt"), "local\n")
+	mustRun(t, f.local, "add", "local.txt")
+	mustRun(t, f.local, "commit", "-m", "local lineage")
+
+	// A missing older terminal head forces the same preflight that previously
+	// collapsed the anchor-only lineage into the generic missing-head safety.
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, strings.Repeat("f", 40)); err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunHeadSHA(recorded.ID, anchor); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunStatusWithVerifiedHead(recorded.ID, types.RunCancelled, anchor); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.InspectCached(f.ctx)
+	if state.Relation != RelationDiverged {
+		t.Fatalf("relation = %q, want diverged: %#v", state.Relation, state)
+	}
+	if state.Safety != "blocked_recover_unincorporated_remote_head" {
+		t.Fatalf("safety = %q, want blocked_recover_unincorporated_remote_head: %#v", state.Safety, state)
+	}
+	for _, want := range []string{f.preserved, anchor, "not incorporated", "no-mistakes(review): fix", "new branch name"} {
+		if !strings.Contains(state.Error, want) {
+			t.Errorf("error missing %q: %s", want, state.Error)
+		}
+	}
+	if state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" {
+		t.Fatalf("next action = %#v", state.NextAction)
+	}
+}
+
 func TestInspectDoesNotOfferKeepLocalForUnverifiedMissingHead(t *testing.T) {
 	t.Parallel()
 

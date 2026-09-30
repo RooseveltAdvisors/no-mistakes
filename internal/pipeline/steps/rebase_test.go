@@ -213,6 +213,132 @@ func TestRebaseStep_UsesDivergentRemoteLineageForRewrittenHead(t *testing.T) {
 	}
 }
 
+func TestRebaseStep_UnreadableTrackingRefStillUsesRemoteLineage(t *testing.T) {
+	t.Parallel()
+
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init", "-b", "main")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	writeFixtureFile(t, dir, "base.txt", "base\n")
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "base")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	writeFixtureFile(t, dir, "feature.txt", "feature\n")
+	gitCmd(t, dir, "add", "feature.txt")
+	gitCmd(t, dir, "commit", "-m", "remote feature lineage")
+	remoteFeatureHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	gitCmd(t, dir, "checkout", "main")
+	writeFixtureFile(t, dir, "main.txt", "new main\n")
+	gitCmd(t, dir, "add", "main.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", "main")
+	localRebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if localRebasedHead == remoteFeatureHead {
+		t.Fatal("fixture did not create a rewritten local head")
+	}
+
+	// Hold the tracking ref's lockfile and drop the ref so the branch fetch
+	// can only warn and rev-parse cannot read origin/feature, while the remote
+	// still carries the diverged lineage.
+	trackingRef := filepath.Join(dir, ".git", "refs", "remotes", "origin", "feature")
+	if err := os.Remove(trackingRef); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trackingRef+".lock", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, localRebasedHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("rebase with an unreadable tracking ref: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected conflict while preserving remote lineage: %s", outcome.Findings)
+	}
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	if !isAncestor(context.Background(), dir, remoteFeatureHead, head) {
+		t.Fatalf("rebased head %s is not an append-only descendant of remote head %s; git log:\n%s", head, remoteFeatureHead, gitCmd(t, dir, "log", "--oneline"))
+	}
+	if got := gitCmd(t, dir, "rev-parse", "origin/main"); got == head {
+		t.Fatalf("rebase silently picked origin/main instead of the remote branch lineage: %s", got)
+	}
+}
+
+func TestRebaseStep_RewrittenHeadProceedsWhenRemoteBranchIsGone(t *testing.T) {
+	t.Parallel()
+
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init", "-b", "main")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	writeFixtureFile(t, dir, "base.txt", "base\n")
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "base")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	writeFixtureFile(t, dir, "feature.txt", "original\n")
+	gitCmd(t, dir, "add", "feature.txt")
+	gitCmd(t, dir, "commit", "-m", "original feature")
+	oldHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	gitCmd(t, dir, "checkout", "main")
+	writeFixtureFile(t, dir, "main.txt", "new main\n")
+	gitCmd(t, dir, "add", "main.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	// The remote branch is deleted out of band while the local head is
+	// rewritten: no remote lineage remains to preserve, so the step must keep
+	// its default force-push target instead of failing the inspection. The
+	// stale local tracking ref is deliberately kept so the rewrite still reads
+	// as a force push.
+	gitCmd(t, upstream, "branch", "-D", "feature")
+
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", "main")
+	localRebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if localRebasedHead == oldHead {
+		t.Fatal("fixture did not create a rewritten local head")
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, oldHead, localRebasedHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("rebase must proceed when the remote branch no longer exists: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected conflict after the remote branch disappeared: %s", outcome.Findings)
+	}
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	mainTip := gitCmd(t, dir, "rev-parse", "origin/main")
+	if !isAncestor(context.Background(), dir, mainTip, head) {
+		t.Fatalf("head %s does not contain origin/main after the default-target rebase", head)
+	}
+}
+
 func TestRebaseStep_UsesConfiguredPRBaseBranch(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
