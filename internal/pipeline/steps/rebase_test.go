@@ -339,6 +339,74 @@ func TestRebaseStep_RewrittenHeadProceedsWhenRemoteBranchIsGone(t *testing.T) {
 	}
 }
 
+func TestRebaseStep_RewrittenHeadKeepsRemoteLineageContainingTheRecordedBase(t *testing.T) {
+	t.Parallel()
+
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init", "-b", "main")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	writeFixtureFile(t, dir, "base.txt", "base\n")
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "base")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	// The run's recorded base is the original feature head.
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	writeFixtureFile(t, dir, "origin.txt", "shared\n")
+	gitCmd(t, dir, "add", "origin.txt")
+	gitCmd(t, dir, "commit", "-m", "recorded feature base")
+	recordedBase := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	// Another clone extends the pushed branch past the recorded base and force
+	// pushes it: the remote head is ahead of the merge-base with origin/main and
+	// contains the run's recorded base.
+	gitCmd(t, dir, "checkout", "-b", "remote-lineage")
+	writeFixtureFile(t, dir, "remote.txt", "remote\n")
+	gitCmd(t, dir, "add", "remote.txt")
+	gitCmd(t, dir, "commit", "-m", "remote lineage")
+	remoteHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "--force", "origin", "HEAD:refs/heads/feature")
+
+	gitCmd(t, dir, "checkout", "main")
+	writeFixtureFile(t, dir, "main.txt", "new main\n")
+	gitCmd(t, dir, "add", "main.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	// The local run rewrote the branch without the recorded base, which reads
+	// as a force push against the diverged remote head.
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "reset", "--hard", recordedBase+"~1")
+	writeFixtureFile(t, dir, "local.txt", "local\n")
+	gitCmd(t, dir, "add", "local.txt")
+	gitCmd(t, dir, "commit", "-m", "local rewrite")
+	localHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if isAncestor(context.Background(), dir, recordedBase, localHead) {
+		t.Fatal("fixture did not drop the recorded base from the local head")
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, recordedBase, localHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("rebase onto the diverged remote lineage: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected conflict while preserving remote lineage: %s", outcome.Findings)
+	}
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	if !isAncestor(context.Background(), dir, remoteHead, head) {
+		t.Fatalf("rebased head %s does not contain remote head %s; git log:\n%s", head, remoteHead, gitCmd(t, dir, "log", "--oneline"))
+	}
+}
+
 func TestRebaseStep_UsesConfiguredPRBaseBranch(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()

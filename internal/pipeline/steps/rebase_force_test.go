@@ -10,12 +10,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 )
 
-func TestRebaseStep_ForcePushSkipsOriginBranch(t *testing.T) {
+func TestRebaseStep_ForcePushRebasesOntoRemoteLineage(t *testing.T) {
 	t.Parallel()
-	// Simulate the scenario that caused the bug: user force-pushes a commit,
-	// but origin/<branch> on the upstream remote has autofix commits from a
-	// prior pipeline run. The rebase step should skip origin/<branch> entirely
-	// and only rebase onto origin/main.
+	// A user force-pushes a commit while origin/<branch> carries autofix
+	// commits from a prior pipeline run. The remote head is ahead of its
+	// merge-base with origin/main, so the branch has a divergence of its own and
+	// the step rebases onto the remote head instead of silently picking
+	// origin/<branch> or origin/main.
 
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -71,16 +72,20 @@ func TestRebaseStep_ForcePushSkipsOriginBranch(t *testing.T) {
 		t.Fatal("expected no approval for clean rebase")
 	}
 
-	// After rebase, HEAD should contain the user's feature.txt content, not autofix
+	// The remote lineage beyond the merge-base wins: the local rewrite has no
+	// commits beyond it, so the step fast-forwards onto the remote head.
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != autofixSHA {
+		t.Fatalf("HEAD = %s, want the remote head %s; the divergent remote lineage was not rebased onto", got, autofixSHA)
+	}
 	content, err := os.ReadFile(filepath.Join(dir, "feature.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.ReplaceAll(string(content), "\r\n", "\n"); got != "user-change\n" {
-		t.Fatalf("feature.txt = %q, want %q; force push was not respected", got, "user-change\n")
+	if got := strings.ReplaceAll(string(content), "\r\n", "\n"); got != "autofix-overwrote-user\n" {
+		t.Fatalf("feature.txt = %q, want %q after rebasing onto the remote head", got, "autofix-overwrote-user\n")
 	}
 
-	// Should be rebased onto origin/main
+	// The branch stays integrated with origin/main as well.
 	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")
 	originMain := gitCmd(t, dir, "rev-parse", "origin/main")
 	if mergeBase != originMain {

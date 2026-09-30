@@ -74,9 +74,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// the branch fetch and then rebase only onto origin/<default>. When the
 	// configured push target has since acquired a separate branch lineage, that
 	// choice guarantees another non-fast-forward push. Inspect that lineage
-	// before choosing the force-push target. A remote head that already contains
-	// the recorded run base is the expected autofix/out-of-band force-push case;
-	// the force-push safety check below must retain ownership of it.
+	// before choosing the force-push target.
 	lineageTarget := ""
 	// Stop before rebasing when the gated branch carries commits that live on
 	// the contributor's local default branch but were never pushed to
@@ -167,11 +165,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 				return nil, fmt.Errorf("inspect remote branch %q against origin/%s before rebase: %w", branch, defaultBranch, err)
 			}
 			remoteHasOwnLineage := remoteSHA != mergeBase
-			recordedBaseInRemote := false
-			if sctx.Run.BaseSHA != "" && !git.IsZeroSHA(sctx.Run.BaseSHA) {
-				recordedBaseInRemote = isAncestor(ctx, sctx.WorkDir, sctx.Run.BaseSHA, privateRef)
-			}
-			if remoteHasOwnLineage && !recordedBaseInRemote {
+			if remoteHasOwnLineage {
 				lineageTarget = privateRef
 				forcePush = false
 				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, privateRef))

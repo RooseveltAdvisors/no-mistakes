@@ -2315,7 +2315,7 @@ func (s *Service) unincorporatedGateHeadMessage(ctx context.Context, state *Stat
 		commitList += fmt.Sprintf("; ... and %d more", len(lines)-maxShown)
 	}
 
-	if state.Relation != RelationDiverged {
+	if state.Relation != RelationDiverged && objectExists(ctx, compareDir, state.Local.Head) {
 		state.Relation = relationBetween(ctx, compareDir, state.Local.Head, run.HeadSHA)
 	}
 	return fmt.Sprintf(

@@ -257,13 +257,17 @@ func TestForcePushRun_RefusesToClobberOutOfBandBranchCommit(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 
 	// Rebase step runs first (force push detected). It must NOT refresh the
-	// origin/feature tracking ref, so the push step still anchors to H1.
+	// origin/feature tracking ref, so the push step still anchors to H1. The
+	// remote head is ahead of its merge-base with origin/main, so the step
+	// rebases onto that lineage instead of silently picking origin/main; against
+	// the user's rewrite that integration stops on a conflict and parks the
+	// step rather than dropping the out-of-band commit.
 	rebaseOutcome, err := (&RebaseStep{}).Execute(sctx)
 	if err != nil {
 		t.Fatalf("rebase step: %v", err)
 	}
-	if rebaseOutcome != nil && rebaseOutcome.NeedsApproval {
-		t.Fatalf("unexpected approval from rebase on a clean force push: %s", rebaseOutcome.Findings)
+	if rebaseOutcome == nil || !rebaseOutcome.NeedsApproval {
+		t.Fatalf("expected the rebase step to park on the out-of-band lineage, got %#v", rebaseOutcome)
 	}
 	recordReviewApproval(t, sctx, gitCmd(t, dir, "rev-parse", "HEAD"))
 

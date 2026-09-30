@@ -1256,6 +1256,57 @@ func TestInspectNamesUnincorporatedGateLineageFromAWorktreeOnlyAnchor(t *testing
 	}
 }
 
+func TestInspectKeepsAnAheadRelationWhenNamingUnincorporatedGateCommits(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	// The published head is available in the invoking worktree and the local
+	// head moved past it, so the entry relation is a proven "ahead" that only
+	// the worktree can demonstrate; the gate then gains a tip the recorded head
+	// does not incorporate.
+	mustRun(t, f.local, "fetch", "--no-tags", f.gate, "refs/heads/feature/recover:refs/no-mistakes/recovery-test")
+	mustRun(t, f.local, "reset", "--hard", f.preserved)
+	mustWrite(t, filepath.Join(f.local, "local.txt"), "local\n")
+	mustRun(t, f.local, "add", "local.txt")
+	mustRun(t, f.local, "commit", "-m", "local follow-up")
+
+	tree := mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}")
+	gateTip := mustRun(t, f.gate, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit-tree", tree, "-p", f.preserved, "-m", "later gate tip")
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", gateTip)
+
+	// A missing older terminal head forces the preflight that reports the
+	// unincorporated gate lineage.
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, strings.Repeat("f", 40)); err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunHeadSHA(recorded.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunStatusWithVerifiedHead(recorded.ID, types.RunCancelled, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.InspectCached(f.ctx)
+	if state.Safety != "blocked_recover_unincorporated_remote_head" {
+		t.Fatalf("safety = %q, want blocked_recover_unincorporated_remote_head: %#v", state.Safety, state)
+	}
+	if state.Relation != RelationAhead {
+		t.Fatalf("relation = %q, want ahead: %#v", state.Relation, state)
+	}
+	for _, want := range []string{gateTip, f.preserved, "not incorporated", "new branch name"} {
+		if !strings.Contains(state.Error, want) {
+			t.Errorf("error missing %q: %s", want, state.Error)
+		}
+	}
+	if state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" {
+		t.Fatalf("next action = %#v", state.NextAction)
+	}
+}
+
 func TestInspectDoesNotOfferKeepLocalForUnverifiedMissingHead(t *testing.T) {
 	t.Parallel()
 
