@@ -70,6 +70,14 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}
 	}
 
+	// A rewritten local head normally makes forcePush true, which used to skip
+	// the branch fetch and then rebase only onto origin/<default>. When the
+	// configured push target has since acquired a separate branch lineage, that
+	// choice guarantees another non-fast-forward push. Inspect that lineage
+	// before choosing the force-push target. A remote head that already contains
+	// the recorded run base is the expected autofix/out-of-band force-push case;
+	// the force-push safety check below must retain ownership of it.
+	lineageTarget := ""
 	// Stop before rebasing when the gated branch carries commits that live on
 	// the contributor's local default branch but were never pushed to
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
@@ -92,8 +100,57 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			Findings:      string(findingsJSON),
 		}, nil
 	}
+	if !forcePush && branch != "" && branch != defaultBranch {
+		remoteSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", branchTarget+"^{commit}")
+		if err == nil {
+			mergeBase, mergeErr := git.Run(ctx, sctx.WorkDir, "merge-base", branchTarget, "origin/"+defaultBranch)
+			if mergeErr != nil {
+				return nil, fmt.Errorf("inspect remote branch %q against origin/%s before rebase: %w", branch, defaultBranch, mergeErr)
+			}
+			remoteHasOwnLineage := remoteSHA != mergeBase && isAncestor(ctx, sctx.WorkDir, mergeBase, branchTarget)
+			localContainsRemote := isAncestor(ctx, sctx.WorkDir, remoteSHA, "HEAD")
+			if remoteHasOwnLineage && !localContainsRemote {
+				lineageTarget = branchTarget
+				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, branchTarget))
+			}
+		}
+	}
+	if forcePush && branch != "" && branch != defaultBranch {
+		privateRef := fmt.Sprintf("refs/no-mistakes/rebase-remote/%s", sctx.Run.ID)
+		if strings.TrimSpace(sctx.Run.ID) == "" {
+			privateRef = "refs/no-mistakes/rebase-remote/" + strings.ReplaceAll(branch, "/", "-")
+		}
+		if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, pushRemote, branch, privateRef); err != nil {
+			return nil, fmt.Errorf("inspect remote branch %q before rebase: fetch: %w", branch, err)
+		}
+		defer func() {
+			_, _ = git.Run(context.WithoutCancel(ctx), sctx.WorkDir, "update-ref", "--no-deref", "-d", privateRef)
+		}()
+
+		remoteSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", privateRef+"^{commit}")
+		if err != nil {
+			return nil, fmt.Errorf("inspect remote branch %q before rebase: resolve fetched head: %w", branch, err)
+		}
+		mergeBase, err := git.Run(ctx, sctx.WorkDir, "merge-base", privateRef, "origin/"+defaultBranch)
+		if err != nil {
+			return nil, fmt.Errorf("inspect remote branch %q against origin/%s before rebase: %w", branch, defaultBranch, err)
+		}
+		remoteHasOwnLineage := remoteSHA != mergeBase && isAncestor(ctx, sctx.WorkDir, mergeBase, privateRef)
+		recordedBaseInRemote := false
+		if sctx.Run.BaseSHA != "" && !git.IsZeroSHA(sctx.Run.BaseSHA) {
+			recordedBaseInRemote = isAncestor(ctx, sctx.WorkDir, sctx.Run.BaseSHA, privateRef)
+		}
+		if remoteHasOwnLineage && !recordedBaseInRemote {
+			lineageTarget = privateRef
+			forcePush = false
+			sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, privateRef))
+		}
+	}
 
 	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget)
+	if lineageTarget != "" {
+		targets = []string{lineageTarget}
+	}
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
 		targets = forcePushRebaseTargets(branch, defaultBranch)

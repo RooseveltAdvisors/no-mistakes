@@ -76,21 +76,140 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 		t.Errorf("expected findings to mention conflict target, got: %s", outcome.Findings)
 	}
 
-	// The non-conflicting rebase onto origin/main should have succeeded
-	logOutput := gitCmd(t, dir, "log", "--oneline", "--all")
-	if !strings.Contains(logOutput, "main non-conflicting update") {
-		t.Log("git log:\n" + logOutput)
-	}
-	// Verify HEAD includes the main update (rebase onto origin/main applied)
+	// The branch has its own remote lineage, so the guard deliberately does not
+	// fall through to origin/main after the remote-target conflict. The local
+	// branch remains at the pre-step head while the approval gate is open.
 	headLog := gitCmd(t, dir, "log", "--oneline")
-	if !strings.Contains(headLog, "main non-conflicting update") {
-		t.Errorf("expected HEAD to include the origin/main rebase; git log:\n%s", headLog)
+	if strings.Contains(headLog, "main non-conflicting update") {
+		t.Errorf("unexpected origin/main rebase after remote-lineage conflict; git log:\n%s", headLog)
 	}
 
 	// Verify worktree is clean
 	status := gitStatusPorcelain(t, dir)
 	if status != "" {
 		t.Fatalf("expected clean worktree, got: %s", status)
+	}
+}
+
+func TestRebaseStep_UsesOwnRemoteLineageAfterLocalRebase(t *testing.T) {
+	t.Parallel()
+
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init", "-b", "main")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "base")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "feature.txt")
+	gitCmd(t, dir, "commit", "-m", "remote feature lineage")
+	remoteFeatureHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "main.txt"), []byte("new main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "main.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", "main")
+	localRebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if localRebasedHead == remoteFeatureHead {
+		t.Fatal("fixture did not create a rewritten local head")
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, localRebasedHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("rebase with divergent remote lineage: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected conflict while preserving remote lineage: %s", outcome.Findings)
+	}
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	if _, err := exec.Command("git", "-C", dir, "merge-base", "--is-ancestor", remoteFeatureHead, head).CombinedOutput(); err != nil {
+		t.Fatalf("rebased head %s is not an append-only descendant of remote head %s", head, remoteFeatureHead)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "origin/main"); got == head {
+		t.Fatalf("rebase silently selected origin/main instead of remote branch lineage: %s", got)
+	}
+}
+
+func TestRebaseStep_UsesDivergentRemoteLineageForRewrittenHead(t *testing.T) {
+	t.Parallel()
+
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir := t.TempDir()
+	gitCmd(t, dir, "init", "-b", "main")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	writeFixtureFile(t, dir, "base.txt", "base\n")
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "base")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	writeFixtureFile(t, dir, "feature.txt", "original\n")
+	gitCmd(t, dir, "add", "feature.txt")
+	gitCmd(t, dir, "commit", "-m", "original feature")
+	oldHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	gitCmd(t, dir, "checkout", "main")
+	writeFixtureFile(t, dir, "main.txt", "new main\n")
+	gitCmd(t, dir, "add", "main.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	// A separate remote lineage is published after the recorded head. It is
+	// ahead of the main merge-base but does not incorporate the run's old head.
+	gitCmd(t, dir, "checkout", "-b", "remote-lineage")
+	writeFixtureFile(t, dir, "remote.txt", "remote lineage\n")
+	gitCmd(t, dir, "add", "remote.txt")
+	gitCmd(t, dir, "commit", "-m", "remote branch lineage")
+	remoteHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "--force", "origin", "HEAD:refs/heads/feature")
+
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", "main")
+	localRebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if localRebasedHead == oldHead {
+		t.Fatal("fixture did not create a rewritten local head")
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, oldHead, localRebasedHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("rebase with divergent remote lineage: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected conflict while preserving remote lineage: %s", outcome.Findings)
+	}
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	if !isAncestor(context.Background(), dir, remoteHead, head) {
+		t.Fatalf("rebased head %s is not an append-only descendant of remote head %s", head, remoteHead)
 	}
 }
 
