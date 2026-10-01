@@ -460,6 +460,7 @@ Risk assessment (after listing all findings):
 		Workload:   workload,
 	}
 	var findings Findings
+	var validationErrors []error
 	for attempt := 1; ; attempt++ {
 		result, err := s.runReviewAgent(sctx, "agent review", sessionRole, opts)
 		if err == nil {
@@ -470,7 +471,11 @@ Risk assessment (after listing all findings):
 		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
 			return nil, err
 		}
+		validationErrors = append(validationErrors, err)
 		if attempt == reviewAnalyzerMaxAttempts {
+			if summary := distinctReviewValidationFailures(validationErrors); summary != "" {
+				return nil, fmt.Errorf("validate review analyzer findings after %d attempts: output kept failing validation across distinct fields (%s): %sattempt %d: %w", reviewAnalyzerMaxAttempts, summary, reviewValidationAttempts(validationErrors[:attempt-1]), attempt, err)
+			}
 			return nil, fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err)
 		}
 		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
@@ -808,6 +813,34 @@ func parseReviewFindingsJSON(raw []byte) (Findings, error) {
 		return Findings{}, err
 	}
 	return findings, nil
+}
+
+func distinctReviewValidationFailures(failures []error) string {
+	fields := make([]string, 0, len(failures))
+	seen := make(map[string]struct{}, len(failures))
+	for _, failure := range failures {
+		var violation *agent.SchemaViolation
+		if !errors.As(failure, &violation) || violation.Field == "" {
+			continue
+		}
+		if _, ok := seen[violation.Field]; ok {
+			continue
+		}
+		seen[violation.Field] = struct{}{}
+		fields = append(fields, violation.Field)
+	}
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.Join(fields, ", ")
+}
+
+func reviewValidationAttempts(failures []error) string {
+	var attempts strings.Builder
+	for i, failure := range failures {
+		fmt.Fprintf(&attempts, "attempt %d: %s; ", i+1, strings.ReplaceAll(failure.Error(), "\n", "; "))
+	}
+	return attempts.String()
 }
 
 // reviewRetryNote is the only thing a rerun review learns from the attempt
