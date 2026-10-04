@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -123,6 +124,21 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "checkout", "feature")
 
+	// Fleet strip stand-in (bead fm-z0i73): the fix-round rebase's amend branch
+	// must run the strip on the stopped rebase's message file before the agent
+	// continues, so record every message file the strip is invoked with.
+	stripRecord := filepath.Join(t.TempDir(), "strip-inputs")
+	hook := filepath.Join(dir, ".git", "hooks", "commit-msg")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\n# stand-in for fm-git-strip-ai-trailers.sh (commit-msg hook mode)\nprintf '%s\\n' \"$1\" >> '"+stripRecord+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hook, 0o500); err != nil {
+		t.Fatal(err)
+	}
+
 	// Agent simulates resolving conflicts: resolve file, git add, git rebase --continue
 	ag := &mockAgent{
 		name: "test",
@@ -182,6 +198,15 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)
 	}
 	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
+	if runtime.GOOS != "windows" {
+		recorded, err := os.ReadFile(stripRecord)
+		if err != nil {
+			t.Fatalf("fleet strip was not run on the rebase amend message: %v", err)
+		}
+		if !strings.Contains(string(recorded), "rebase-merge/message") {
+			t.Fatalf("strip did not run on the stopped rebase's message file; recorded: %s", recorded)
+		}
+	}
 	// Verify rebase completed - feature is now ahead of origin/main
 	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")
 	originMain := gitCmd(t, dir, "rev-parse", "origin/main")

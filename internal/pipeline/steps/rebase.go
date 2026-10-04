@@ -370,6 +370,16 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	sctx.Log("conflicts detected, asking agent to resolve...")
 	conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 
+	// The stopped rebase holds the amend side of a fix-round commit: the agent
+	// resolves the conflicts and runs `git rebase --continue`, which births
+	// .git/rebase-merge/message as the new commit object. Run the fleet
+	// commit-msg strip on that message file first, so the amended commit cannot
+	// be born with an AI co-author trailer.
+	if err := git.StripRebaseAmendMessage(ctx, sctx.WorkDir); err != nil {
+		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
+		return fmt.Errorf("strip AI co-author trailers from rebase amend message: %w", err)
+	}
+
 	prompt := fmt.Sprintf(
 		`Resolve git rebase conflicts. The rebase of the current branch onto %s has conflicts.
 
