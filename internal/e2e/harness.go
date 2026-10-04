@@ -21,6 +21,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -156,6 +157,14 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// Disable background update checks so helper processes do not write
 	// update-check.json while testing.T is removing the temp directory.
 	t.Setenv("NO_MISTAKES_NO_UPDATE_CHECK", "1")
+
+	// Run-worktree commits fail closed without the firstmate fleet AI
+	// co-author trailer strip; give the daemon a pass-through stand-in.
+	strip := filepath.Join(root, "fm-git-strip-ai-trailers.sh")
+	if err := os.WriteFile(strip, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write trailer strip stand-in: %v", err)
+	}
+	t.Setenv(git.TrailerStripEnvVar, strip)
 
 	h.writeGlobalConfig()
 	h.initGitRepos()

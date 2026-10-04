@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
 // TestMain handles fake CLI dispatch when the test binary is invoked as gh/glab.
@@ -23,7 +25,29 @@ func TestMain(m *testing.M) {
 	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
 	// t.Setenv (issue #362).
 	os.Unsetenv("GIT_CONFIG_COUNT")
-	os.Exit(m.Run())
+	// Fix-round commits fail closed without the fleet AI co-author trailer
+	// strip; give every test a builtins-only stand-in (some tests empty PATH)
+	// that drops co-author trailers.
+	stripDir, err := os.MkdirTemp("", "no-mistakes-steps-strip-")
+	if err != nil {
+		panic(err)
+	}
+	strip := filepath.Join(stripDir, "fm-git-strip-ai-trailers.sh")
+	if err := os.WriteFile(strip, []byte(`#!/bin/sh
+kept=
+while IFS= read -r line || [ -n "$line" ]; do
+	case "$line" in [Cc][Oo]-[Aa][Uu][Tt][Hh][Oo][Rr][Ee][Dd]-[Bb][Yy]:*) continue ;; esac
+	kept="$kept$line
+"
+done <"$1"
+printf '%s' "$kept" >"$1"
+`), 0o755); err != nil {
+		panic(err)
+	}
+	os.Setenv(git.TrailerStripEnvVar, strip)
+	code := m.Run()
+	_ = os.RemoveAll(stripDir)
+	os.Exit(code)
 }
 
 func handleFakeCLI(mode string) {

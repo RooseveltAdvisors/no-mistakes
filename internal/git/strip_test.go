@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,9 +14,7 @@ import (
 // testStripScript stands in for firstmate's bin/fm-git-strip-ai-trailers.sh in
 // hook mode: it rewrites the message file in place, dropping the AI co-author
 // trailer lines a fix round can emit (fleet identity and model names) and
-// keeping everything else, including human trailers. Its comment names the
-// real script so resolveCommitMsgStripper's fleet-hook check matches it the
-// way it matches the installed wrapper.
+// keeping everything else.
 const testStripScript = `#!/bin/sh
 # fm-git-strip-ai-trailers.sh test stand-in (commit-msg hook mode).
 file=$1
@@ -47,21 +46,61 @@ func requirePosixExec(t *testing.T) {
 	}
 }
 
-// installStrip writes content as the commit-msg hook of hooksDir, executable
-// the way fm-spawn installs the fleet hook.
-func installStrip(t *testing.T, hooksDir, content string) string {
+func writeExecutable(t *testing.T, path, content string) string {
 	t.Helper()
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	hook := filepath.Join(hooksDir, "commit-msg")
-	if err := os.WriteFile(hook, []byte(content), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(hook, 0o500); err != nil {
+	return path
+}
+
+// configureFleetStrip points TrailerStripEnvVar at a strip kept outside every
+// repository, the way a Portal-shaped install configures the fleet asset.
+func configureFleetStrip(t *testing.T) {
+	t.Helper()
+	t.Setenv(TrailerStripEnvVar, writeExecutable(t, filepath.Join(t.TempDir(), "fleet", "bin", trailerStripScript), testStripScript))
+}
+
+// newGateRunWorktree reproduces a real run: the source repository is cloned
+// into a bare gate, the gate's hooks come only from RefreshManagedGateHooks,
+// hook isolation is applied as gate init applies it, and the run worktree is a
+// linked worktree created by WorktreeAdd. setup runs in the source repository
+// before the gate is created, so committed content (a firstmate bin/) arrives
+// through the checkout like any other file.
+func newGateRunWorktree(t *testing.T, setup func(src string)) (src, gate, wt string) {
+	t.Helper()
+	ctx := context.Background()
+	src = initTestRepo(t)
+	if setup != nil {
+		setup(src)
+	}
+	gate = filepath.Join(t.TempDir(), "gate.git")
+	run(t, src, "git", "clone", "--bare", src, gate)
+	if err := RefreshManagedGateHooks(gate); err != nil {
 		t.Fatal(err)
 	}
-	return hook
+	isolated, err := EnsureHooksPathIsolation(ctx, gate)
+	if err != nil || !isolated {
+		t.Fatalf("isolate gate hooks path: isolated=%v err=%v", isolated, err)
+	}
+	wt = filepath.Join(t.TempDir(), "run")
+	if err := WorktreeAdd(ctx, gate, wt, run(t, src, "git", "rev-parse", "HEAD")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyLocalUserIdentity(ctx, src, wt); err != nil {
+		t.Fatal(err)
+	}
+	return src, gate, wt
+}
+
+func gitInDir(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-c", "core.editor=true"}, args...)...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 func assertCleanOfAIcoAuthors(t *testing.T, where, message string) {
@@ -71,13 +110,12 @@ func assertCleanOfAIcoAuthors(t *testing.T, where, message string) {
 	}
 }
 
-func TestStripCommitMessage_StripsFleetAndModelTrailersBeforeCreate(t *testing.T) {
-	t.Parallel()
+func TestGateRun_PortalShaped_StripsPipelineAndAgentCommits(t *testing.T) {
 	requirePosixExec(t)
-	dir := initTestRepo(t)
-	installStrip(t, filepath.Join(dir, ".git", "hooks"), testStripScript)
+	configureFleetStrip(t)
+	_, _, wt := newGateRunWorktree(t, nil)
 
-	stripped, err := StripCommitMessage(context.Background(), dir, dirtyFixRoundMessage)
+	stripped, err := StripCommitMessage(context.Background(), wt, dirtyFixRoundMessage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,23 +123,66 @@ func TestStripCommitMessage_StripsFleetAndModelTrailersBeforeCreate(t *testing.T
 	if !strings.HasPrefix(stripped, "fix(payments): claim the collection slot\n\n- a body line kept intact.") {
 		t.Fatalf("subject/body not preserved, got:\n%s", stripped)
 	}
+	run(t, wt, "git", "commit", "--allow-empty", "-m", stripped)
+	assertCleanOfAIcoAuthors(t, "pipeline fix-round commit", run(t, wt, "git", "log", "-1", "--format=%B"))
 
-	run(t, dir, "git", "commit", "--allow-empty", "-m", stripped)
-	committed := run(t, dir, "git", "log", "-1", "--format=%B")
-	assertCleanOfAIcoAuthors(t, "create-branch commit", committed)
+	// The fix agent's own commit and amend go through the gate's commit-msg hook.
+	run(t, wt, "git", "commit", "--allow-empty", "-m", dirtyFixRoundMessage)
+	assertCleanOfAIcoAuthors(t, "agent commit", run(t, wt, "git", "log", "-1", "--format=%B"))
+	run(t, wt, "git", "commit", "--amend", "--allow-empty", "-m", dirtyFixRoundMessage)
+	committed := run(t, wt, "git", "log", "-1", "--format=%B")
+	assertCleanOfAIcoAuthors(t, "agent amend", committed)
 	if !strings.Contains(committed, "fix(payments): claim the collection slot") {
 		t.Fatalf("committed message lost its subject:\n%s", committed)
 	}
 }
 
-func TestStripCommitMessage_CleanMessagePassesThroughByteIdentical(t *testing.T) {
-	t.Parallel()
+func TestGateRun_FirstmateShaped_ResolvesWorktreeBin(t *testing.T) {
 	requirePosixExec(t)
-	dir := initTestRepo(t)
-	installStrip(t, filepath.Join(dir, ".git", "hooks"), testStripScript)
+	t.Setenv(TrailerStripEnvVar, "")
+	_, _, wt := newGateRunWorktree(t, func(src string) {
+		writeExecutable(t, filepath.Join(src, "bin", trailerStripScript), testStripScript)
+		run(t, src, "git", "add", ".")
+		run(t, src, "git", "commit", "-m", "add fleet strip")
+	})
+
+	stripped, err := StripCommitMessage(context.Background(), wt, dirtyFixRoundMessage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCleanOfAIcoAuthors(t, "stripped message", stripped)
+	run(t, wt, "git", "commit", "--allow-empty", "-m", dirtyFixRoundMessage)
+	assertCleanOfAIcoAuthors(t, "agent commit", run(t, wt, "git", "log", "-1", "--format=%B"))
+}
+
+func TestGateRun_NoStrip_RefusesEveryCommit(t *testing.T) {
+	requirePosixExec(t)
+	t.Setenv(TrailerStripEnvVar, "")
+	_, _, wt := newGateRunWorktree(t, nil)
+	head := run(t, wt, "git", "rev-parse", "HEAD")
+
+	if _, err := StripCommitMessage(context.Background(), wt, dirtyFixRoundMessage); !errors.Is(err, ErrNoTrailerStrip) {
+		t.Fatalf("StripCommitMessage without a strip: got %v, want ErrNoTrailerStrip", err)
+	}
+	out, err := gitInDir(wt, "commit", "--allow-empty", "-m", "no-mistakes: apply agent fixes")
+	if err == nil {
+		t.Fatal("agent commit succeeded without a fleet strip")
+	}
+	if !strings.Contains(out, trailerStripScript) || !strings.Contains(out, TrailerStripEnvVar) {
+		t.Fatalf("refusal does not name the missing stripper:\n%s", out)
+	}
+	if got := run(t, wt, "git", "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD moved from %s to %s despite the refusal", head, got)
+	}
+}
+
+func TestStripCommitMessage_CleanMessagePassesThroughByteIdentical(t *testing.T) {
+	requirePosixExec(t)
+	configureFleetStrip(t)
+	_, _, wt := newGateRunWorktree(t, nil)
 
 	clean := "no-mistakes(review): tighten the gate label check"
-	stripped, err := StripCommitMessage(context.Background(), dir, clean)
+	stripped, err := StripCommitMessage(context.Background(), wt, clean)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,122 +191,97 @@ func TestStripCommitMessage_CleanMessagePassesThroughByteIdentical(t *testing.T)
 	}
 }
 
-func TestStripCommitMessage_NoFleetStripLeavesMessageUntouched(t *testing.T) {
-	t.Parallel()
-	requirePosixExec(t)
-	dir := initTestRepo(t) // no commit-msg hook, no in-worktree strip script
-
-	stripped, err := StripCommitMessage(context.Background(), dir, dirtyFixRoundMessage)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stripped != dirtyFixRoundMessage {
-		t.Fatalf("message changed without a fleet strip:\n%s", stripped)
-	}
-}
-
-func TestStripCommitMessage_ResolvesStripFromWorktreeBin(t *testing.T) {
-	t.Parallel()
-	requirePosixExec(t)
-	dir := initTestRepo(t)
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	script := filepath.Join(binDir, "fm-git-strip-ai-trailers.sh")
-	if err := os.WriteFile(script, []byte(testStripScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(script, 0o500); err != nil {
-		t.Fatal(err)
-	}
-
-	stripped, err := StripCommitMessage(context.Background(), dir, dirtyFixRoundMessage)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertCleanOfAIcoAuthors(t, "stripped message", stripped)
-}
-
-func TestStripCommitMessage_DoesNotDriveAProjectsOwnCommitMsgHook(t *testing.T) {
-	t.Parallel()
-	requirePosixExec(t)
-	dir := initTestRepo(t)
-	sentinel := filepath.Join(t.TempDir(), "project-hook-ran")
-	hook := installStrip(t, filepath.Join(dir, ".git", "hooks"),
-		"#!/bin/sh\nprintf '%s\\n' ran >> '"+sentinel+"'\n")
-
-	stripped, err := StripCommitMessage(context.Background(), dir, dirtyFixRoundMessage)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stripped != dirtyFixRoundMessage {
-		t.Fatalf("message changed by a non-fleet hook:\n%s", stripped)
-	}
-	if _, err := os.Stat(sentinel); err == nil {
-		t.Fatalf("helper drove the project's own commit-msg hook %s; only the fleet strip may run here", hook)
-	}
-}
-
-func TestStripRebaseAmendMessage_StripsBeforeRebaseContinue(t *testing.T) {
-	t.Parallel()
-	requirePosixExec(t)
-	dir := initTestRepo(t)
-	// Keep git's own completion of the amended pick non-interactive, the way
-	// the pipeline's NonInteractiveEnv does for every git call it runs.
-	run(t, dir, "git", "config", "core.editor", "true")
-	base := run(t, dir, "git", "rev-parse", "HEAD")
-
-	// topic side of the conflict
-	run(t, dir, "git", "checkout", "-b", "topic")
-	writeFile(t, filepath.Join(dir, "conflict.txt"), "topic side\n")
-	run(t, dir, "git", "add", ".")
-	run(t, dir, "git", "commit", "-m", "topic side")
-
-	// mainline side: an amend-destined commit that carries AI trailers, made
-	// BEFORE the strip hook exists so it enters the rebase dirty.
-	run(t, dir, "git", "checkout", "-b", "mainline", base)
-	writeFile(t, filepath.Join(dir, "conflict.txt"), "mainline side\n")
-	run(t, dir, "git", "add", ".")
-	run(t, dir, "git", "commit", "-m", dirtyFixRoundMessage)
-
-	// Stop the rebase on the conflict, then install the fleet strip, matching
-	// a fix round that runs with the strip available.
-	cmd := exec.Command("git", "rebase", "topic")
-	cmd.Dir = dir
-	if err := cmd.Run(); err == nil {
+// conflictingRebase builds a run worktree whose detached head carries two
+// commits with AI trailers, each conflicting with the upstream branch, so
+// `git rebase upstream` stops twice.
+func conflictingRebase(t *testing.T) string {
+	t.Helper()
+	_, _, wt := newGateRunWorktree(t, func(src string) {
+		base := run(t, src, "git", "rev-parse", "HEAD")
+		run(t, src, "git", "checkout", "-b", "upstream")
+		writeFile(t, filepath.Join(src, "a.txt"), "upstream a\n")
+		writeFile(t, filepath.Join(src, "b.txt"), "upstream b\n")
+		run(t, src, "git", "add", ".")
+		run(t, src, "git", "commit", "-m", "upstream side")
+		run(t, src, "git", "checkout", "-b", "feature", base)
+		writeFile(t, filepath.Join(src, "a.txt"), "feature a\n")
+		run(t, src, "git", "add", ".")
+		run(t, src, "git", "commit", "-m", dirtyFixRoundMessage)
+		writeFile(t, filepath.Join(src, "b.txt"), "feature b\n")
+		run(t, src, "git", "add", ".")
+		run(t, src, "git", "commit", "-m", "fix(payments): keep the decline reason\n\nCo-authored-by: firstmate-worker <worker@firstmate.local>")
+	})
+	if _, err := gitInDir(wt, "rebase", "--exec", RestripRebaseExec, "upstream"); err == nil {
 		t.Fatal("expected the rebase to stop on a conflict")
 	}
-	messageFile := filepath.Join(dir, ".git", "rebase-merge", "message")
-	if _, err := os.Stat(messageFile); err != nil {
-		t.Fatalf("expected a stopped rebase message file: %v", err)
-	}
-	installStrip(t, filepath.Join(dir, ".git", "hooks"), testStripScript)
+	return wt
+}
 
-	if err := StripRebaseAmendMessage(context.Background(), dir); err != nil {
+func TestGateRun_RebaseAmend_StripsEveryStop(t *testing.T) {
+	requirePosixExec(t)
+	configureFleetStrip(t)
+	wt := conflictingRebase(t)
+
+	if err := StripRebaseAmendMessage(context.Background(), wt); err != nil {
 		t.Fatal(err)
 	}
+	messageFile := run(t, wt, "git", "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/message")
 	inProgress, err := os.ReadFile(messageFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertCleanOfAIcoAuthors(t, "in-progress rebase message", string(inProgress))
-	if !strings.Contains(string(inProgress), "fix(payments): claim the collection slot") {
-		t.Fatalf("rebase message lost its subject:\n%s", inProgress)
+
+	// The fix agent resolves each stop and continues; RestripRebaseExec
+	// re-commits each pick, including the second stop, through the gate's
+	// commit-msg hook.
+	writeFile(t, filepath.Join(wt, "a.txt"), "resolved a\n")
+	run(t, wt, "git", "add", "a.txt")
+	if _, err := gitInDir(wt, "rebase", "--continue"); err == nil {
+		t.Fatal("expected the rebase to stop on the second conflict")
+	}
+	writeFile(t, filepath.Join(wt, "b.txt"), "resolved b\n")
+	run(t, wt, "git", "add", "b.txt")
+	if out, err := gitInDir(wt, "rebase", "--continue"); err != nil {
+		t.Fatalf("rebase --continue: %v\n%s", err, out)
 	}
 
-	run(t, dir, "git", "add", "conflict.txt")
-	run(t, dir, "git", "rebase", "--continue")
-	amended := run(t, dir, "git", "log", "-1", "--format=%B")
-	assertCleanOfAIcoAuthors(t, "amend-branch commit", amended)
+	body := run(t, wt, "git", "log", "--format=%B", "upstream..HEAD")
+	assertCleanOfAIcoAuthors(t, "rebased commits", body)
+	for _, want := range []string{"fix(payments): claim the collection slot", "fix(payments): keep the decline reason"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("rebased commits lost %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestGateRun_RebaseAmend_RefusedWithoutStrip(t *testing.T) {
+	requirePosixExec(t)
+	t.Setenv(TrailerStripEnvVar, "")
+	wt := conflictingRebase(t)
+
+	if err := StripRebaseAmendMessage(context.Background(), wt); !errors.Is(err, ErrNoTrailerStrip) {
+		t.Fatalf("StripRebaseAmendMessage without a strip: got %v, want ErrNoTrailerStrip", err)
+	}
+	writeFile(t, filepath.Join(wt, "a.txt"), "resolved a\n")
+	run(t, wt, "git", "add", "a.txt")
+	out, err := gitInDir(wt, "rebase", "--continue")
+	if err == nil {
+		t.Fatal("rebase --continue completed without a fleet strip")
+	}
+	if !strings.Contains(out, trailerStripScript) {
+		t.Fatalf("refusal does not name the missing stripper:\n%s", out)
+	}
+	if _, err := os.Stat(run(t, wt, "git", "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge")); err != nil {
+		t.Fatalf("rebase no longer in progress after the refusal: %v", err)
+	}
 }
 
 func TestSquashBodyAssembledFromStrippedFixRoundCommitsIsClean(t *testing.T) {
-	t.Parallel()
 	requirePosixExec(t)
-	dir := initTestRepo(t)
-	installStrip(t, filepath.Join(dir, ".git", "hooks"), testStripScript)
-	base := run(t, dir, "git", "rev-parse", "HEAD")
+	configureFleetStrip(t)
+	_, _, wt := newGateRunWorktree(t, nil)
+	base := run(t, wt, "git", "rev-parse", "HEAD")
 
 	// The shape GitHub assembles at squash-merge time: every commit message of
 	// the PR concatenated. Each message is born through the strip first.
@@ -234,17 +290,15 @@ func TestSquashBodyAssembledFromStrippedFixRoundCommitsIsClean(t *testing.T) {
 		"no-mistakes(review): tighten the gate label check",
 		"fix(payments): keep the decline reason on rollback\n\nCo-authored-by: firstmate-worker <worker@firstmate.local>",
 	} {
-		stripped, err := StripCommitMessage(context.Background(), dir, message)
+		stripped, err := StripCommitMessage(context.Background(), wt, message)
 		if err != nil {
 			t.Fatal(err)
 		}
-		run(t, dir, "git", "commit", "--allow-empty", "-m", stripped)
+		run(t, wt, "git", "commit", "--allow-empty", "-m", stripped)
 	}
 
-	body := run(t, dir, "git", "log", "--format=%B", base+"..HEAD")
-	if strings.Contains(strings.ToLower(body), "co-authored-by:") {
-		t.Fatalf("squash body assembled from stripped commits carries a trailer:\n%s", body)
-	}
+	body := run(t, wt, "git", "log", "--format=%B", base+"..HEAD")
+	assertCleanOfAIcoAuthors(t, "squash body", body)
 	for _, want := range []string{"fix(payments): claim the collection slot", "no-mistakes(review): tighten the gate label check"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("squash body lost %q:\n%s", want, body)

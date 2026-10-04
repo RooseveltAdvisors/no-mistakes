@@ -114,7 +114,7 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	gitCmd(t, dir, "checkout", "-b", "feature")
 	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature change\n"), 0o644)
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature change")
+	gitCmd(t, dir, "commit", "-m", "feature change\n\nCo-authored-by: firstmate-worker <worker@firstmate.local>")
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 
 	gitCmd(t, dir, "checkout", "main")
@@ -123,21 +123,6 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "main conflict")
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "checkout", "feature")
-
-	// Fleet strip stand-in (bead fm-z0i73): the fix-round rebase's amend branch
-	// must run the strip on the stopped rebase's message file before the agent
-	// continues, so record every message file the strip is invoked with.
-	stripRecord := filepath.Join(t.TempDir(), "strip-inputs")
-	hook := filepath.Join(dir, ".git", "hooks", "commit-msg")
-	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\n# stand-in for fm-git-strip-ai-trailers.sh (commit-msg hook mode)\nprintf '%s\\n' \"$1\" >> '"+stripRecord+"'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(hook, 0o500); err != nil {
-		t.Fatal(err)
-	}
 
 	// Agent simulates resolving conflicts: resolve file, git add, git rebase --continue
 	ag := &mockAgent{
@@ -199,12 +184,9 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	}
 	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
 	if runtime.GOOS != "windows" {
-		recorded, err := os.ReadFile(stripRecord)
-		if err != nil {
-			t.Fatalf("fleet strip was not run on the rebase amend message: %v", err)
-		}
-		if !strings.Contains(string(recorded), "rebase-merge/message") {
-			t.Fatalf("strip did not run on the stopped rebase's message file; recorded: %s", recorded)
+		// The stopped pick the agent continued is born without its AI trailer.
+		if msg := gitCmd(t, dir, "log", "-1", "--format=%B"); strings.Contains(strings.ToLower(msg), "co-authored-by:") {
+			t.Fatalf("rebased fix-round commit still carries an AI co-author trailer:\n%s", msg)
 		}
 	}
 	// Verify rebase completed - feature is now ahead of origin/main

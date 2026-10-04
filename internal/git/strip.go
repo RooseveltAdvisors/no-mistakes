@@ -8,50 +8,44 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // The fleet's AI-co-author trailer strip (firstmate's
-// bin/fm-git-strip-ai-trailers.sh) is installed per task as the commit-msg
-// hook, so an ordinary worker `git commit` or `git commit --amend` rewrites the
-// message file in place before the commit object exists. A no-mistakes run
-// executes outside that pane: the daemon's git carries no core.hooksPath
-// override, so a fix-round commit (or the message of a fix-round rebase that is
-// mid-conflict) can be born without the strip ever seeing it - the invocation
-// hole that lets Co-authored-by trailers reach main through a GitHub squash body
-// (bead fm-z0i73). These helpers run the same strip on the message file first,
-// so a fix-round commit is never born with an AI co-author trailer, and a
-// repository without the fleet strip commits exactly as it does today.
+// bin/fm-git-strip-ai-trailers.sh) is a firstmate fleet asset, not part of
+// no-mistakes. An ordinary worker pane installs it as its commit-msg hook, but a
+// no-mistakes run commits in a linked worktree of the gate, whose hooks resolve
+// to the gate's hooks dir - so a fix-round commit (or the message of a
+// fix-round rebase that is mid-conflict) would be born without the strip ever
+// seeing it, the invocation hole that lets Co-authored-by trailers reach main
+// through a GitHub squash body (bead fm-z0i73). The pipeline therefore runs the
+// strip on every message it commits, the gate's managed commit-msg hook runs it
+// on every commit the fix agent makes itself, and both refuse to commit when no
+// strip resolves.
 
-// commitMsgStripMarker is the name that identifies the fleet strip among every
-// other commit-msg hook a repository could configure. Only a hook whose file
-// content names fm-git-strip-ai-trailers is driven from here: a project's own
-// commit-msg hook keeps running exactly once - at git's own commit time - rather
-// than being re-driven from this helper on a temp file it may not expect.
-const commitMsgStripMarker = "fm-git-strip-ai-trailers"
+// TrailerStripEnvVar names the absolute path where this install keeps the
+// firstmate fleet asset fm-git-strip-ai-trailers.sh. Runs of the firstmate
+// repository itself fall back to the copy in the worktree's bin/.
+const TrailerStripEnvVar = "NO_MISTAKES_AI_TRAILER_STRIP"
 
-// resolveCommitMsgStripper locates the fleet strip the way an ordinary commit
-// does: git's own hooks resolution first (core.hooksPath from config or
-// GIT_CONFIG env, else the repository hooks directory), which is where
-// fm-spawn installs the per-task commit-msg hook, then the in-worktree
-// bin/fm-git-strip-ai-trailers.sh that runs of the firstmate repository itself
-// carry. Returns "" when no fleet strip resolves - the caller then leaves the
-// message untouched, matching a machine with no fleet installed.
-func resolveCommitMsgStripper(ctx context.Context, dir string) string {
-	if runtime.GOOS == "windows" {
-		// The strip is a POSIX shell script; fleet launches do not install it
-		// on Windows, so nothing resolves and commits behave as before.
-		return ""
+const trailerStripScript = "fm-git-strip-ai-trailers.sh"
+
+// ErrNoTrailerStrip is returned when neither the configured path nor the
+// worktree's bin/ holds an executable fleet strip; the commit is refused.
+var ErrNoTrailerStrip = fmt.Errorf("commit refused: AI co-author trailer stripper %s not found; set %s to its path", trailerStripScript, TrailerStripEnvVar)
+
+// resolveCommitMsgStripper returns the fleet strip for the worktree dir: the
+// configured TrailerStripEnvVar path first, then dir/bin/fm-git-strip-ai-trailers.sh.
+// The gate's managed commit-msg hook applies the same order.
+func resolveCommitMsgStripper(dir string) (string, error) {
+	if configured := os.Getenv(TrailerStripEnvVar); configured != "" && isExecutableFile(configured) {
+		return configured, nil
 	}
-	if hooksDir, err := Run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "hooks"); err == nil {
-		if hook := filepath.Join(strings.TrimSpace(hooksDir), "commit-msg"); isExecutableFile(hook) &&
-			hookNamesFleetStrip(hook) {
-			return hook
-		}
+	if script := filepath.Join(dir, "bin", trailerStripScript); isExecutableFile(script) {
+		return script, nil
 	}
-	if script := filepath.Join(dir, "bin", "fm-git-strip-ai-trailers.sh"); isExecutableFile(script) {
-		return script
-	}
-	return ""
+	return "", ErrNoTrailerStrip
 }
 
 // isExecutableFile reports whether path is an executable regular file.
@@ -63,32 +57,14 @@ func isExecutableFile(path string) bool {
 	return info.Mode().IsRegular() && info.Mode()&0o111 != 0
 }
 
-// hookNamesFleetStrip reports whether a commit-msg hook file is (or wraps) the
-// fleet strip, by reading a bounded prefix of its content. The installed hook
-// embeds the absolute fm-git-strip-ai-trailers.sh path, and the script itself
-// names itself in its usage text, so both forms match; a project's own hook
-// (husky, commitizen, ...) does not and is left for git to run itself.
-func hookNamesFleetStrip(hook string) bool {
-	prefix := make([]byte, 4096)
-	f, err := os.Open(hook)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-	n, _ := f.Read(prefix)
-	return strings.Contains(string(prefix[:n]), commitMsgStripMarker)
-}
-
 // runStripper invokes the fleet strip in its commit-msg hook mode on
-// messageFile: the script rewrites that file in place. dir becomes the hook's
-// working directory so the installed wrapper's own hook chaining resolves the
-// hooks of the repository the message belongs to rather than of whatever
-// directory the pipeline process happens to live in. A failing strip fails the
+// messageFile: the script rewrites that file in place. A failing strip fails the
 // caller: a message that could not be proven trailer-free is never committed.
 func runStripper(ctx context.Context, dir, stripper, messageFile string) error {
 	cmd := exec.CommandContext(ctx, stripper, messageFile)
 	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
+	shellenv.ConfigureShellCommand(cmd)
+	if out, err := shellenv.CombinedOutputShellCommand(cmd); err != nil {
 		return fmt.Errorf("run AI co-author trailer strip %s on %s: %w: %s",
 			stripper, messageFile, err, strings.TrimSpace(string(out)))
 	}
@@ -97,14 +73,17 @@ func runStripper(ctx context.Context, dir, stripper, messageFile string) error {
 
 // StripCommitMessage rewrites message through the fleet AI-co-author trailer
 // strip before a pipeline-authored fix-round commit is born, and returns the
-// message to commit. When no fleet strip resolves in dir (a repository that was
-// never launched through the fleet), message is returned unchanged. When the
-// strip runs, a message it does not change is returned byte-identical to the
-// input, so clean fix-round messages keep their exact bytes.
+// message to commit. It returns ErrNoTrailerStrip when no strip resolves for
+// dir. A message the strip does not change is returned byte-identical.
 func StripCommitMessage(ctx context.Context, dir, message string) (string, error) {
-	stripper := resolveCommitMsgStripper(ctx, dir)
-	if stripper == "" {
+	if runtime.GOOS == "windows" {
+		// The strip is a POSIX shell script and the fleet does not run on
+		// Windows; the managed commit-msg hook is not installed there either.
 		return message, nil
+	}
+	stripper, err := resolveCommitMsgStripper(dir)
+	if err != nil {
+		return "", err
 	}
 	staged, err := os.CreateTemp("", "no-mistakes-commit-msg-*")
 	if err != nil {
@@ -129,12 +108,18 @@ func StripCommitMessage(ctx context.Context, dir, message string) (string, error
 	return unchangedWhenClean(message, string(stripped)), nil
 }
 
+// RestripRebaseExec is the `git rebase --exec` command a fix-round rebase runs
+// after every replayed pick. `git rebase --continue` births a stopped pick
+// without running commit-msg hooks, so the amend re-commits each pick through
+// the gate's managed commit-msg hook, including every stop the fix agent
+// continues past.
+const RestripRebaseExec = "git commit --amend --no-edit --allow-empty"
+
 // StripRebaseAmendMessage rewrites the in-progress message of a rebase that
-// stopped on conflicts - the amend side of a fix round: when the fix agent
-// resolves the conflicts and runs `git rebase --continue`, git births that
-// message as the new commit object, so the strip has to run on the file first.
-// It is a no-op when no rebase is in progress or when no fleet strip resolves
-// in dir.
+// stopped on conflicts - the amend side of a fix round - and returns
+// ErrNoTrailerStrip when no strip resolves, so the rebase is refused before the
+// fix agent is asked to continue it. Later stops of the same rebase are
+// stripped by RestripRebaseExec. It is a no-op when no rebase is in progress.
 func StripRebaseAmendMessage(ctx context.Context, dir string) error {
 	messageFile, err := Run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/message")
 	if err != nil {
@@ -147,9 +132,12 @@ func StripRebaseAmendMessage(ctx context.Context, dir string) error {
 		}
 		return fmt.Errorf("stat rebase message file: %w", err)
 	}
-	stripper := resolveCommitMsgStripper(ctx, dir)
-	if stripper == "" {
+	if runtime.GOOS == "windows" {
 		return nil
+	}
+	stripper, err := resolveCommitMsgStripper(dir)
+	if err != nil {
+		return err
 	}
 	return runStripper(ctx, dir, stripper, messageFile)
 }

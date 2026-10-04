@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -669,32 +670,16 @@ func TestCommitAgentFixes_NoChanges(t *testing.T) {
 	}
 }
 
-// TestCommitAgentFixes_RunsFleetStripOnMessageBeforeCommit pins the invocation
-// half of bead fm-z0i73: a fix-round commit must pass its message through the
-// fleet commit-msg strip before git writes the commit object. The stand-in hook
-// records every message file it is given, so the test can prove the helper
-// staged the message (a temp file) first - if the strip only ever ran at
-// `git commit` time the recorded file would be .git/COMMIT_EDITMSG.
-func TestCommitAgentFixes_RunsFleetStripOnMessageBeforeCommit(t *testing.T) {
-	t.Parallel()
+// TestCommitAgentFixes_RefusesWithoutFleetStrip pins the fail-closed half of
+// bead fm-z0i73: a fix-round commit is never created when no fleet AI
+// co-author trailer strip resolves.
+func TestCommitAgentFixes_RefusesWithoutFleetStrip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fleet trailer strip is a POSIX script; fleet launches do not install it on Windows")
 	}
+	t.Setenv(git.TrailerStripEnvVar, "")
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
-
-	record := filepath.Join(t.TempDir(), "strip-inputs")
-	hook := filepath.Join(dir, ".git", "hooks", "commit-msg")
-	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	script := "#!/bin/sh\n# stand-in for fm-git-strip-ai-trailers.sh (commit-msg hook mode)\nprintf '%s\\n' \"$1\" >> '" + record + "'\n"
-	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(hook, 0o500); err != nil {
-		t.Fatal(err)
-	}
 
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -702,17 +687,12 @@ func TestCommitAgentFixes_RunsFleetStripOnMessageBeforeCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback"); err != nil {
-		t.Fatal(err)
+	err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback")
+	if !errors.Is(err, git.ErrNoTrailerStrip) {
+		t.Fatalf("commitAgentFixes without a fleet strip: got %v, want ErrNoTrailerStrip", err)
 	}
-
-	recorded, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatalf("fleet strip was not invoked before the fix-round commit: %v", err)
-	}
-	first := strings.Split(strings.TrimSpace(string(recorded)), "\n")[0]
-	if filepath.Base(first) == "COMMIT_EDITMSG" {
-		t.Fatalf("strip only ran at git commit time (%s); the message must be stripped before the commit is born", first)
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD moved to %s despite the refusal", got)
 	}
 }
 
