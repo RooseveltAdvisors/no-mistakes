@@ -32,7 +32,7 @@ flowchart TD
 When you run `no-mistakes init` in a repo:
 
 1. It creates a local bare gate repo under `~/.no-mistakes/repos/<id>.git`.
-2. It installs a `pre-receive` admission hook and a `post-receive` notification hook in that gate repo.
+2. It installs a `pre-receive` admission hook, a `post-receive` notification hook, and a `commit-msg` hook that runs the [AI co-author trailer strip](/no-mistakes/reference/environment/#no_mistakes_ai_trailer_strip) on run-worktree commits in that gate repo.
 3. It enables Git push options for the gate repo.
 4. It best-effort isolates the gate repo's hooks path from shared local Git config writes when Git supports `config --worktree`.
 5. It adds a `no-mistakes` remote to your working repo that points at the gate.
