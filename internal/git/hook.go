@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -115,9 +114,6 @@ func RefreshManagedGateHooks(bareDir string) error {
 	}
 	if _, err := RefreshManagedPostReceiveHook(bareDir); err != nil {
 		return err
-	}
-	if runtime.GOOS == "windows" {
-		return nil
 	}
 	hookPath := filepath.Join(bareDir, "hooks", "commit-msg")
 	desired := []byte(CommitMsgHookScript())

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -674,9 +673,6 @@ func TestCommitAgentFixes_NoChanges(t *testing.T) {
 // bead fm-z0i73: a fix-round commit is never created when no fleet AI
 // co-author trailer strip resolves.
 func TestCommitAgentFixes_RefusesWithoutFleetStrip(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the fleet trailer strip is a POSIX script; fleet launches do not install it on Windows")
-	}
 	t.Setenv(git.TrailerStripEnvVar, "")
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)

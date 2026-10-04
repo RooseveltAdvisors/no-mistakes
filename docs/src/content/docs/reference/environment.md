@@ -122,7 +122,7 @@ Absolute path where this install keeps `fm-git-strip-ai-trailers.sh`, the AI co-
 | Type    | absolute path to an executable                                         |
 | Default | unset (falls back to `bin/fm-git-strip-ai-trailers.sh` in the run worktree) |
 
-Every fix-round commit, and every commit, `--amend`, or `rebase --continue` the fix agent makes in a run worktree, passes its message through this script first. When neither this path nor the run worktree's `bin/fm-git-strip-ai-trailers.sh` holds an executable script, the commit is refused. Set it where the daemon's login shell loads it (see [Environment the daemon sees](#environment-the-daemon-sees)). Not applied on Windows.
+Every fix-round commit, and every commit, `--amend`, or `rebase --continue` the fix agent makes in a run worktree, passes its message through this script first. When neither this path nor the run worktree's `bin/fm-git-strip-ai-trailers.sh` holds an executable script, or when the script fails to run, the commit is refused on every platform. Set it where the daemon's login shell loads it (see [Environment the daemon sees](#environment-the-daemon-sees)).
 
 ## `XDG_DATA_HOME`
 

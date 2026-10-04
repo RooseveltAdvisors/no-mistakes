@@ -42,7 +42,7 @@ Co-authored-by: cursor <cursor@cursor.example>`
 func requirePosixExec(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("the fleet trailer strip is a POSIX script; fleet launches do not install it on Windows")
+		t.Skip("the stand-in fleet strip and gate hook are POSIX shell scripts")
 	}
 }
 
@@ -211,7 +211,7 @@ func conflictingRebase(t *testing.T) string {
 		run(t, src, "git", "add", ".")
 		run(t, src, "git", "commit", "-m", "fix(payments): keep the decline reason\n\nCo-authored-by: firstmate-worker <worker@firstmate.local>")
 	})
-	if _, err := gitInDir(wt, "rebase", "--exec", RestripRebaseExec, "upstream"); err == nil {
+	if _, err := gitInDir(wt, RestripRebaseArgs("upstream")...); err == nil {
 		t.Fatal("expected the rebase to stop on a conflict")
 	}
 	return wt
@@ -232,8 +232,8 @@ func TestGateRun_RebaseAmend_StripsEveryStop(t *testing.T) {
 	}
 	assertCleanOfAIcoAuthors(t, "in-progress rebase message", string(inProgress))
 
-	// The fix agent resolves each stop and continues; RestripRebaseExec
-	// re-commits each pick, including the second stop, through the gate's
+	// The fix agent resolves each stop and continues; RestripRebaseArgs'
+	// exec line re-commits each pick, including the second stop, through the gate's
 	// commit-msg hook.
 	writeFile(t, filepath.Join(wt, "a.txt"), "resolved a\n")
 	run(t, wt, "git", "add", "a.txt")
@@ -248,6 +248,9 @@ func TestGateRun_RebaseAmend_StripsEveryStop(t *testing.T) {
 
 	body := run(t, wt, "git", "log", "--format=%B", "upstream..HEAD")
 	assertCleanOfAIcoAuthors(t, "rebased commits", body)
+	if err := VerifyStrippedRange(context.Background(), wt, "upstream..HEAD"); err != nil {
+		t.Fatalf("VerifyStrippedRange on a stripped rebase: %v", err)
+	}
 	for _, want := range []string{"fix(payments): claim the collection slot", "fix(payments): keep the decline reason"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("rebased commits lost %q:\n%s", want, body)
@@ -272,8 +275,33 @@ func TestGateRun_RebaseAmend_RefusedWithoutStrip(t *testing.T) {
 	if !strings.Contains(out, trailerStripScript) {
 		t.Fatalf("refusal does not name the missing stripper:\n%s", out)
 	}
+	// A second --continue must not skip the failed strip.
+	if out, err := gitInDir(wt, "rebase", "--continue"); err == nil {
+		t.Fatalf("a repeated rebase --continue skipped the failed strip:\n%s", out)
+	}
 	if _, err := os.Stat(run(t, wt, "git", "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge")); err != nil {
 		t.Fatalf("rebase no longer in progress after the refusal: %v", err)
+	}
+}
+
+func TestVerifyStrippedRange_RefusesTrailerOrMissingStrip(t *testing.T) {
+	requirePosixExec(t)
+	dir := initTestRepo(t)
+	base := run(t, dir, "git", "rev-parse", "HEAD")
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "no-mistakes(review): clean")
+
+	configureFleetStrip(t)
+	if err := VerifyStrippedRange(context.Background(), dir, base+"..HEAD"); err != nil {
+		t.Fatalf("clean range refused: %v", err)
+	}
+	run(t, dir, "git", "commit", "--allow-empty", "-m", dirtyFixRoundMessage)
+	if err := VerifyStrippedRange(context.Background(), dir, base+"..HEAD"); err == nil {
+		t.Fatal("range with an AI co-author trailer was accepted")
+	}
+
+	t.Setenv(TrailerStripEnvVar, "")
+	if err := VerifyStrippedRange(context.Background(), dir, base+"..HEAD"); !errors.Is(err, ErrNoTrailerStrip) {
+		t.Fatalf("VerifyStrippedRange without a strip: got %v, want ErrNoTrailerStrip", err)
 	}
 }
 

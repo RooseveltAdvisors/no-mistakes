@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -183,11 +182,9 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)
 	}
 	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
-	if runtime.GOOS != "windows" {
-		// The stopped pick the agent continued is born without its AI trailer.
-		if msg := gitCmd(t, dir, "log", "-1", "--format=%B"); strings.Contains(strings.ToLower(msg), "co-authored-by:") {
-			t.Fatalf("rebased fix-round commit still carries an AI co-author trailer:\n%s", msg)
-		}
+	// The stopped pick the agent continued is born without its AI trailer.
+	if msg := gitCmd(t, dir, "log", "-1", "--format=%B"); strings.Contains(strings.ToLower(msg), "co-authored-by:") {
+		t.Fatalf("rebased fix-round commit still carries an AI co-author trailer:\n%s", msg)
 	}
 	// Verify rebase completed - feature is now ahead of origin/main
 	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")

@@ -48,13 +48,15 @@ func resolveCommitMsgStripper(dir string) (string, error) {
 	return "", ErrNoTrailerStrip
 }
 
-// isExecutableFile reports whether path is an executable regular file.
+// isExecutableFile reports whether path is an executable regular file. Windows
+// carries no executable mode bits, so any regular file qualifies there and the
+// strip is refused when it fails to run.
 func isExecutableFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
-	return info.Mode().IsRegular() && info.Mode()&0o111 != 0
+	return info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode()&0o111 != 0)
 }
 
 // runStripper invokes the fleet strip in its commit-msg hook mode on
@@ -76,11 +78,6 @@ func runStripper(ctx context.Context, dir, stripper, messageFile string) error {
 // message to commit. It returns ErrNoTrailerStrip when no strip resolves for
 // dir. A message the strip does not change is returned byte-identical.
 func StripCommitMessage(ctx context.Context, dir, message string) (string, error) {
-	if runtime.GOOS == "windows" {
-		// The strip is a POSIX shell script and the fleet does not run on
-		// Windows; the managed commit-msg hook is not installed there either.
-		return message, nil
-	}
 	stripper, err := resolveCommitMsgStripper(dir)
 	if err != nil {
 		return "", err
@@ -108,18 +105,21 @@ func StripCommitMessage(ctx context.Context, dir, message string) (string, error
 	return unchangedWhenClean(message, string(stripped)), nil
 }
 
-// RestripRebaseExec is the `git rebase --exec` command a fix-round rebase runs
-// after every replayed pick. `git rebase --continue` births a stopped pick
-// without running commit-msg hooks, so the amend re-commits each pick through
-// the gate's managed commit-msg hook, including every stop the fix agent
-// continues past.
-const RestripRebaseExec = "git commit --amend --no-edit --allow-empty"
+// RestripRebaseArgs returns the git arguments of a fix-round rebase onto
+// target. `git rebase --continue` births a stopped pick without running
+// commit-msg hooks, so an exec line after every replayed pick re-commits it
+// through the gate's managed commit-msg hook, including every stop the fix
+// agent continues past; a failed strip is rescheduled, so --continue can never
+// skip it.
+func RestripRebaseArgs(target string) []string {
+	return []string{"rebase", "--reschedule-failed-exec", "--exec", "git commit --amend --no-edit --allow-empty", target}
+}
 
 // StripRebaseAmendMessage rewrites the in-progress message of a rebase that
 // stopped on conflicts - the amend side of a fix round - and returns
 // ErrNoTrailerStrip when no strip resolves, so the rebase is refused before the
 // fix agent is asked to continue it. Later stops of the same rebase are
-// stripped by RestripRebaseExec. It is a no-op when no rebase is in progress.
+// stripped by RestripRebaseArgs. It is a no-op when no rebase is in progress.
 func StripRebaseAmendMessage(ctx context.Context, dir string) error {
 	messageFile, err := Run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/message")
 	if err != nil {
@@ -132,14 +132,36 @@ func StripRebaseAmendMessage(ctx context.Context, dir string) error {
 		}
 		return fmt.Errorf("stat rebase message file: %w", err)
 	}
-	if runtime.GOOS == "windows" {
-		return nil
-	}
 	stripper, err := resolveCommitMsgStripper(dir)
 	if err != nil {
 		return err
 	}
 	return runStripper(ctx, dir, stripper, messageFile)
+}
+
+// VerifyStrippedRange runs every commit message in revRange through the fleet
+// strip and refuses, with the strip's own error when it cannot run, when any
+// message is not already trailer-free. It proves a fix-round rebase completed
+// with every replayed pick stripped, however the fix agent continued it.
+func VerifyStrippedRange(ctx context.Context, dir, revRange string) error {
+	out, err := Run(ctx, dir, "rev-list", revRange)
+	if err != nil {
+		return fmt.Errorf("list rebased commits: %w", err)
+	}
+	for _, sha := range strings.Fields(out) {
+		message, err := Run(ctx, dir, "log", "-1", "--format=%B", sha)
+		if err != nil {
+			return fmt.Errorf("read commit message %s: %w", sha, err)
+		}
+		stripped, err := StripCommitMessage(ctx, dir, message)
+		if err != nil {
+			return err
+		}
+		if stripped != message {
+			return fmt.Errorf("commit %s still carries an AI co-author trailer after the rebase", sha)
+		}
+	}
+	return nil
 }
 
 // unchangedWhenClean returns original untouched when the strip's rewrite only
