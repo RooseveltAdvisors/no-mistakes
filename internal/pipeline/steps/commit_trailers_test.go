@@ -44,7 +44,9 @@ func TestCommitAgentFixes_AppendsTrailersForTheAgentThatRan(t *testing.T) {
 	if got, want := lastCommitMessage(t, dir), "no-mistakes(review): repair widget"; got != want {
 		t.Fatalf("commit subject = %q, want %q", got, want)
 	}
-	want := "Co-Authored-By: no-mistakes codex <noreply@example.com>\nAssisted-by: no-mistakes:codex:gpt-5.5"
+	// The fleet AI-co-author trailer strip runs after commit.trailers render,
+	// so a configured Co-Authored-By trailer never reaches the commit.
+	want := "Assisted-by: no-mistakes:codex:gpt-5.5"
 	if got := gitTrailers(t, dir); got != want {
 		t.Fatalf("commit trailers = %q, want %q", got, want)
 	}

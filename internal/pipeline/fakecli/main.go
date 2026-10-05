@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
 // stripStandInName is the name the fake fleet AI-co-author trailer strip is
@@ -30,6 +32,12 @@ func main() {
 	if strings.HasPrefix(filepath.Base(os.Args[0]), stripStandInName) {
 		stripCoAuthorTrailers(os.Args[1])
 		return
+	}
+	// The fake provider plugin is selected by executable name, not by
+	// FAKE_CLI_MODE: that variable is shared by every fake gh/git in the same
+	// step environment.
+	if isFakeProviderPlugin(os.Args[0]) {
+		os.Exit(fakeplugin.Main(os.Args[1:], os.Stdin, os.Stdout, os.Getenv(fakeplugin.EnvState), os.Getenv(fakeplugin.EnvLog)))
 	}
 	mode := os.Getenv("FAKE_CLI_MODE")
 	if mode == "" {
@@ -54,6 +62,14 @@ func stripCoAuthorTrailers(messageFile string) {
 	if err := os.WriteFile(messageFile, []byte(kept.String()), 0o644); err != nil {
 		panic(err)
 	}
+}
+
+// isFakeProviderPlugin ignores the extension and its case: Windows resolves
+// a PATH lookup through PATHEXT, which yields an upper-case ".EXE".
+func isFakeProviderPlugin(arg0 string) bool {
+	base := filepath.Base(arg0)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	return strings.EqualFold(base, fakeplugin.ExecutableName)
 }
 
 func handleFakeCLI(mode string) {
