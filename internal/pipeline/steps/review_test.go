@@ -305,6 +305,7 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 }
 
 func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "hanging-review-agent",
@@ -354,6 +355,7 @@ func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 // process was actually doing - and it is what makes a silent 30-minute review
 // timeout diagnosable instead of a dead end.
 func TestReviewStep_WallClockTimeoutPreservesTheAgentReport(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "reporting-review-agent",
@@ -391,6 +393,7 @@ func TestReviewStep_WallClockTimeoutPreservesTheAgentReport(t *testing.T) {
 // Each fixer and each independent rereviewer must start with a fresh silent
 // budget, not leftover time from the previous turn.
 func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
@@ -455,6 +458,7 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 }
 
 func TestReviewFix_PostAgentCommitUsesStepParentContext(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
@@ -517,6 +521,7 @@ func TestReviewFix_PostAgentCommitUsesStepParentContext(t *testing.T) {
 }
 
 func TestReviewStep_LateCompletionAfterInvocationDeadlineIsRejected(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "late-reviewer",
@@ -538,6 +543,7 @@ func TestReviewStep_LateCompletionAfterInvocationDeadlineIsRejected(t *testing.T
 }
 
 func TestReviewStep_StreamingPastStallBudgetCompletes(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	const stall = 80 * time.Millisecond
 	done := time.NewTimer(stall + stall/2)
@@ -573,6 +579,7 @@ func TestReviewStep_StreamingPastStallBudgetCompletes(t *testing.T) {
 }
 
 func TestReviewStep_ProgressWithoutTerminalCompletionCannotPublish(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "progress-only-reviewer",
