@@ -173,6 +173,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	ctx := sctx.Ctx
 	failingNames := targets.checkNames()
 	mergeConflict := targets.MergeConflict
+	rebase := mergeConflict || targets.BehindBase
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return ciRepairResult{}, err
 	}
@@ -187,7 +188,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	}
 	rebaseBaseSHA := resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	promptBaseSHA := baseSHA
-	if mergeConflict {
+	if rebase {
 		promptBaseSHA = rebaseBaseSHA
 	}
 
@@ -209,6 +210,9 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		promptRules = ciFailingCheckFixRules
 	case mergeConflict:
 		promptIntro = "The PR has merge conflicts with the base branch. Rebase onto the base branch and resolve the merge conflicts."
+		promptRules = ciMergeConflictFixRules
+	case targets.BehindBase && len(failingNames) == 0:
+		promptIntro = "The PR has no merge conflicts, but it is behind a base branch that requires branches to be up to date before merging. Rebase onto the base branch, resolving any conflicts the rebase reports."
 		promptRules = ciMergeConflictFixRules
 	case len(failingNames) == 0:
 		promptIntro = "Address the following findings selected at the CI gate of this PR."
@@ -240,7 +244,7 @@ Context:
 		mergeConflict,
 		promptRules,
 	)
-	if mergeConflict {
+	if rebase {
 		prompt += fmt.Sprintf("\n- rebase target commit: %s", rebaseBaseSHA)
 	}
 	if logOutput != "" {
@@ -296,7 +300,7 @@ CI logs:
 		repair.Summary = conclusion.Summary
 		return repair, nil
 	}
-	if !mergeConflict && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
+	if !rebase && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
 		repair.NoCodeChangeNeeded = true
 		repair.Summary = conclusion.Summary
 	}
