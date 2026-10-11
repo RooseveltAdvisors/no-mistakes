@@ -106,7 +106,8 @@ func RefreshManagedPreReceiveHook(bareDir string) (bool, error) {
 	return true, nil
 }
 
-// RefreshManagedGateHooks owns the complete receive boundary.
+// RefreshManagedGateHooks owns the complete receive boundary and the
+// commit-msg hook every run worktree of the gate commits through.
 func RefreshManagedGateHooks(bareDir string) error {
 	if _, err := RefreshManagedPreReceiveHook(bareDir); err != nil {
 		return err
@@ -114,7 +115,32 @@ func RefreshManagedGateHooks(bareDir string) error {
 	if _, err := RefreshManagedPostReceiveHook(bareDir); err != nil {
 		return err
 	}
-	return nil
+	hookPath := filepath.Join(bareDir, "hooks", "commit-msg")
+	desired := []byte(CommitMsgHookScript())
+	if existing, err := os.ReadFile(hookPath); err == nil && string(existing) == string(desired) {
+		return nil
+	}
+	return writeGateFileAtomic(hookPath, desired, 0o755, ".commit-msg-*")
+}
+
+// CommitMsgHookScript returns the gate's commit-msg hook. Run worktrees resolve
+// hooks to the gate's hooks dir, so every commit born in one - the pipeline's
+// fix-round commits and the fix agent's own commit, --amend, or
+// rebase --continue - runs the firstmate fleet AI co-author trailer strip,
+// resolved as StripCommitMessage resolves it, and is refused when none exists.
+func CommitMsgHookScript() string {
+	return `#!/bin/sh
+# no-mistakes commit-msg hook
+STRIP=${` + TrailerStripEnvVar + `:-}
+if [ -z "$STRIP" ] || [ ! -x "$STRIP" ]; then
+  STRIP="$(git rev-parse --show-toplevel 2>/dev/null)/bin/` + trailerStripScript + `"
+fi
+if [ ! -f "$STRIP" ] || [ ! -x "$STRIP" ]; then
+  printf 'no-mistakes: %s\n' ` + shellSingleQuote(ErrNoTrailerStrip.Error()) + ` >&2
+  exit 1
+fi
+exec "$STRIP" "$@"
+`
 }
 
 // PostReceiveHookScript returns the shell script for the post-receive hook.
@@ -308,8 +334,8 @@ func MarkGateConfigCurrent(bareDir string) error {
 }
 
 func gateConfigStampContent() string {
-	sum := sha256.Sum256([]byte("gate-config-v2\x00" + PreReceiveHookScript() + "\x00" + PostReceiveHookScript()))
-	return fmt.Sprintf("v2:%x\n", sum)
+	sum := sha256.Sum256([]byte("gate-config-v3\x00" + PreReceiveHookScript() + "\x00" + PostReceiveHookScript() + "\x00" + CommitMsgHookScript()))
+	return fmt.Sprintf("v3:%x\n", sum)
 }
 
 // IsolateHooksPath protects the gate's post-receive hook from being

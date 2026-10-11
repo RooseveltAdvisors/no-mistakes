@@ -8,6 +8,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
@@ -137,7 +138,13 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
 	if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
 		return false, fmt.Errorf("stage CI changes: %w", err)
 	}
-	if _, err := stepGitRun(sctx, "commit", "-m", "no-mistakes: apply CI fixes"); err != nil {
+	// The CI repair commit is a fix-round commit too: strip AI co-author
+	// trailers from the message before the commit object exists.
+	commitMessage, err := git.StripCommitMessage(sctx.Ctx, sctx.WorkDir, "no-mistakes: apply CI fixes")
+	if err != nil {
+		return false, fmt.Errorf("strip AI co-author trailers from CI-fix commit message: %w", err)
+	}
+	if _, err := stepGitRun(sctx, "commit", "-m", commitMessage); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}
 	headSHA, err := stepGitHeadSHA(sctx)

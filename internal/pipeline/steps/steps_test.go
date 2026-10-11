@@ -11,10 +11,16 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
 // TestMain handles fake CLI dispatch when the test binary is invoked as gh/glab.
 func TestMain(m *testing.M) {
+	if strings.HasPrefix(filepath.Base(os.Args[0]), stripStandInName) {
+		stripCoAuthorTrailers(os.Args[1])
+		return
+	}
 	if mode := os.Getenv("FAKE_CLI_MODE"); mode != "" {
 		handleFakeCLI(mode)
 		return
@@ -23,7 +29,50 @@ func TestMain(m *testing.M) {
 	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
 	// t.Setenv (issue #362).
 	os.Unsetenv("GIT_CONFIG_COUNT")
-	os.Exit(m.Run())
+	// Fix-round commits fail closed without the fleet AI co-author trailer
+	// strip; give every test a stand-in that drops co-author trailers. It is a
+	// copy of this test binary, so it runs on every platform and with an empty
+	// PATH.
+	stripDir, err := os.MkdirTemp("", "no-mistakes-steps-strip-")
+	if err != nil {
+		panic(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	binary, err := os.ReadFile(self)
+	if err != nil {
+		panic(err)
+	}
+	strip := filepath.Join(stripDir, stripStandInName+filepath.Ext(self))
+	if err := os.WriteFile(strip, binary, 0o755); err != nil {
+		panic(err)
+	}
+	os.Setenv(git.TrailerStripEnvVar, strip)
+	code := m.Run()
+	_ = os.RemoveAll(stripDir)
+	os.Exit(code)
+}
+
+const stripStandInName = "fm-git-strip-ai-trailers"
+
+// stripCoAuthorTrailers is the stand-in fleet strip: it rewrites messageFile in
+// place without its Co-authored-by lines.
+func stripCoAuthorTrailers(messageFile string) {
+	data, err := os.ReadFile(messageFile)
+	if err != nil {
+		panic(err)
+	}
+	var kept strings.Builder
+	for _, line := range strings.SplitAfter(string(data), "\n") {
+		if !strings.HasPrefix(strings.ToLower(line), "co-authored-by:") {
+			kept.WriteString(line)
+		}
+	}
+	if err := os.WriteFile(messageFile, []byte(kept.String()), 0o644); err != nil {
+		panic(err)
+	}
 }
 
 func handleFakeCLI(mode string) {

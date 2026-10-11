@@ -359,16 +359,27 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err == nil {
-		return nil
+	_, rebaseErr := git.Run(ctx, sctx.WorkDir, git.RestripRebaseArgs(targetRef)...)
+	if rebaseErr == nil {
+		return verifyRebaseStripped(ctx, sctx, targetRef)
 	}
 
 	if len(rebaseConflictFiles(ctx, sctx.WorkDir)) == 0 {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
-		return fmt.Errorf("rebase onto %s failed (no conflicts detected)", targetRef)
+		return fmt.Errorf("rebase onto %s failed (no conflicts detected): %w", targetRef, rebaseErr)
 	}
 	sctx.Log("conflicts detected, asking agent to resolve...")
 	conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
+
+	// The stopped rebase holds the amend side of a fix-round commit: the agent
+	// resolves the conflicts and runs `git rebase --continue`, which births
+	// .git/rebase-merge/message as the new commit object. Strip that message
+	// now, refusing the rebase when no fleet strip resolves; every later stop
+	// is re-committed through the gate's commit-msg hook by RestripRebaseArgs.
+	if err := git.StripRebaseAmendMessage(ctx, sctx.WorkDir); err != nil {
+		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
+		return fmt.Errorf("strip AI co-author trailers from rebase amend message: %w", err)
+	}
 
 	prompt := fmt.Sprintf(
 		`Resolve git rebase conflicts. The rebase of the current branch onto %s has conflicts.
@@ -408,9 +419,21 @@ Instructions:
 	// Verify rebase completed (no rebase still in progress)
 	if rebaseInProgress(ctx, sctx.WorkDir) {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
+		if _, stripErr := git.StripCommitMessage(ctx, sctx.WorkDir, "no-mistakes: rebase strip probe"); stripErr != nil {
+			return fmt.Errorf("agent did not complete the rebase: %w", stripErr)
+		}
 		return fmt.Errorf("agent did not complete the rebase")
 	}
 
+	return verifyRebaseStripped(ctx, sctx, targetRef)
+}
+
+// verifyRebaseStripped refuses a completed fix-round rebase whose replayed
+// commits are not all trailer-free under the fleet strip.
+func verifyRebaseStripped(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
+	if err := git.VerifyStrippedRange(ctx, sctx.WorkDir, targetRef+"..HEAD"); err != nil {
+		return fmt.Errorf("verify rebased commits are stripped of AI co-author trailers: %w", err)
+	}
 	return nil
 }
 

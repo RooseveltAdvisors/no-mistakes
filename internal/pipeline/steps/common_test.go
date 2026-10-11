@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -665,6 +666,29 @@ func TestCommitAgentFixes_NoChanges(t *testing.T) {
 	}
 	if sctx.Run.HeadSHA != originalHeadSHA {
 		t.Errorf("HeadSHA changed unexpectedly: %s -> %s", originalHeadSHA, sctx.Run.HeadSHA)
+	}
+}
+
+// TestCommitAgentFixes_RefusesWithoutFleetStrip pins the fail-closed half of
+// bead fm-z0i73: a fix-round commit is never created when no fleet AI
+// co-author trailer strip resolves.
+func TestCommitAgentFixes_RefusesWithoutFleetStrip(t *testing.T) {
+	t.Setenv(git.TrailerStripEnvVar, "")
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.ReviewStartingHeadSHA = headSHA
+	if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback")
+	if !errors.Is(err, git.ErrNoTrailerStrip) {
+		t.Fatalf("commitAgentFixes without a fleet strip: got %v, want ErrNoTrailerStrip", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD moved to %s despite the refusal", got)
 	}
 }
 

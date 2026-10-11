@@ -113,6 +113,17 @@ Disable background update checks.
 
 Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), hit GitHub releases, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) suppress the check automatically.
 
+## `NO_MISTAKES_AI_TRAILER_STRIP`
+
+Absolute path where this install keeps `fm-git-strip-ai-trailers.sh`, the AI co-author trailer strip. The script is a firstmate fleet asset, not part of no-mistakes.
+
+|         |                                                                        |
+| ------- | ---------------------------------------------------------------------- |
+| Type    | absolute path to an executable                                         |
+| Default | unset (falls back to `bin/fm-git-strip-ai-trailers.sh` in the run worktree) |
+
+Every fix-round commit, and every commit, `--amend`, or `rebase --continue` the fix agent makes in a run worktree, passes its message through this script first. When neither this path nor the run worktree's `bin/fm-git-strip-ai-trailers.sh` holds an executable script, or when the script fails to run, the commit is refused on every platform. Set it where the daemon's login shell loads it (see [Environment the daemon sees](#environment-the-daemon-sees)).
+
 ## `XDG_DATA_HOME`
 
 Data directory used to discover OpenCode transcripts for intent extraction.

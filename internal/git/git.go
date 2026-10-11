@@ -608,9 +608,24 @@ func isWorktreeConfigWriteUnavailable(err error) bool {
 }
 
 // WorktreeAdd creates a detached worktree at wtPath checked out to the given SHA.
+// When the repository has per-worktree config enabled (every migrated gate),
+// the new worktree's core.hooksPath is pinned to the repository's own hooks dir,
+// so a subprocess writing core.hooksPath to shared config cannot route the
+// worktree's commits around the gate's managed commit-msg hook.
 func WorktreeAdd(ctx context.Context, repoDir, wtPath, sha string) error {
-	_, err := Run(ctx, repoDir, "worktree", "add", "--detach", wtPath, sha)
-	return err
+	if _, err := Run(ctx, repoDir, "worktree", "add", "--detach", wtPath, sha); err != nil {
+		return err
+	}
+	commonDir, err := Run(ctx, wtPath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolve worktree common dir: %w", err)
+	}
+	hooksDir := filepath.Join(strings.TrimSpace(commonDir), "hooks")
+	if _, err := Run(ctx, wtPath, "config", "--worktree", "core.hooksPath", hooksDir); err != nil &&
+		!isWorktreeConfigWriteUnavailable(err) {
+		return fmt.Errorf("pin worktree core.hooksPath: %w", err)
+	}
+	return nil
 }
 
 // WorktreeRemove removes a worktree at the given path.

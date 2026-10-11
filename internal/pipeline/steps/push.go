@@ -49,8 +49,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
-		_, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", "no-mistakes: apply agent fixes")
+		// Same strip as the fix-round commit: the push-step commit is born
+		// through the fleet commit-msg hook's script, never with a trailer.
+		commitMessage, err := git.StripCommitMessage(ctx, sctx.WorkDir, "no-mistakes: apply agent fixes")
 		if err != nil {
+			return nil, fmt.Errorf("strip AI co-author trailers from agent-fix commit message: %w", err)
+		}
+		if _, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", commitMessage); err != nil {
 			return nil, fmt.Errorf("commit agent changes: %w", err)
 		}
 		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)

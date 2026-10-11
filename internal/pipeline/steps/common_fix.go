@@ -135,6 +135,13 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err != nil {
 		return fmt.Errorf("render %s fix commit message: %w", stepName, err)
 	}
+	// A fix round's commit must be born without an AI co-author trailer even
+	// when the message ever carries one: run the fleet commit-msg strip on the
+	// message file first, exactly as an ordinary worker commit does.
+	commitMessage, err = git.StripCommitMessage(ctx, sctx.WorkDir, commitMessage)
+	if err != nil {
+		return fmt.Errorf("strip AI co-author trailers from %s commit message: %w", stepName, err)
+	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 		return fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
