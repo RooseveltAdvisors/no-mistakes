@@ -425,19 +425,19 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
 	}
-	// A fix round's commit must be born without an AI co-author trailer even
-	// when the message ever carries one: run the fleet commit-msg strip on the
-	// message file first, exactly as an ordinary worker commit does.
-	commitMessage, err = git.StripCommitMessage(ctx, sctx.WorkDir, commitMessage)
-	if err != nil {
-		return false, fmt.Errorf("strip AI co-author trailers from %s commit message: %w", stepName, err)
-	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
 	headBeforeCommit, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return false, fmt.Errorf("resolve head before %s commit: %w", stepName, err)
+	}
+	// A fix round's commit must be born without an AI co-author trailer even
+	// when the message ever carries one: run the fleet commit-msg strip on the
+	// message file first, exactly as an ordinary worker commit does.
+	commitMessage, err = git.StripCommitMessage(ctx, sctx.WorkDir, commitMessage)
+	if err != nil {
+		return false, fmt.Errorf("strip AI co-author trailers from %s commit message: %w", stepName, err)
 	}
 	if err := commitPipelineCorrection(ctx, sctx.WorkDir, commitMessage, sctx.Log); err != nil {
 		return false, fmt.Errorf("commit %s changes: %w", stepName, err)
