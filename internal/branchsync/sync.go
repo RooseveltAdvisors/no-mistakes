@@ -671,9 +671,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_run_active", "the run that owns this branch is still active; drive it to completion or abort it first; no files or refs were changed")
 	}
 	if keepLocal {
-		runIDs, candidateHeads, anyMissing, allEligible := s.missingHeadKeepLocalRuns(ctx, &state, run)
+		runIDs, candidateHeads, anyMissing, allEligible, missingHeads := s.missingHeadKeepLocalRuns(ctx, &state, run)
 		if anyMissing && !allEligible {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_manual_reconciliation", "a stranded run has unverified or conflicting recovery evidence; reconcile it before returning branch custody")
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_manual_reconciliation", "a stranded run has unverified or conflicting recovery evidence ("+s.missingHeadDetail(missingHeads)+"); reconcile it before returning branch custody")
 		}
 		if anyMissing {
 			return s.recoverKeepLocalAtCurrentHead(ctx, run, state, runIDs, candidateHeads)
@@ -789,7 +789,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	}
 	if !gateAnchorAvailable {
 		if !objectExists(ctx, gateDir, preserved) {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserved_head_missing", fmt.Sprintf("the recorded pipeline head %s is missing from the local gate; inspect the recorded and live heads before returning custody; no files or refs were changed", preserved))
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserved_head_missing", fmt.Sprintf("the recorded pipeline head %s is missing from the local gate %s; inspect the recorded and live heads before returning custody; no files or refs were changed", preserved, gateDir))
 		}
 		if err := custody.PreserveRecoveryHead(ctx, gateDir, run.ID, preserved); err != nil {
 			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the recorded pipeline head exists but could not be anchored in the local gate; no files or worktree refs were changed")
@@ -1744,16 +1744,16 @@ func (s *Service) classifyPipelineOwned(ctx context.Context, state *State, run *
 	state.Pipeline.Phase = "pre_push"
 	state.Relation = relationBetween(ctx, s.workDir(), state.Local.Head, run.HeadSHA)
 	if terminalRunStatus(run.Status) {
-		_, _, anyMissing, allEligible := s.missingHeadKeepLocalRuns(ctx, state, run)
+		_, _, anyMissing, allEligible, missingHeads := s.missingHeadKeepLocalRuns(ctx, state, run)
 		if anyMissing {
 			if allEligible {
 				state.Safety = "blocked_recover_preserved_head_missing"
-				state.Error = "a stranded run's recorded pipeline head is not available in the invoking worktree or local gate; recover custody by keeping the current local head, which discards the missing preserved commits"
+				state.Error = "stranded " + s.missingHeadDetail(missingHeads) + "; recover custody by keeping the current local head, which discards the missing preserved commits"
 				state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover --keep-local"}
 				return
 			}
 			state.Safety = "blocked_recover_manual_reconciliation"
-			state.Error = "a stranded run has missing, unverified, or conflicting recovery evidence; inspect and reconcile the recorded and live heads manually"
+			state.Error = "a stranded run has missing, unverified, or conflicting recovery evidence (" + s.missingHeadDetail(missingHeads) + "); inspect and reconcile the recorded and live heads manually"
 			state.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
 			return
 		}
@@ -1813,27 +1813,30 @@ func (proof recoverySourceProof) apply(state State) State {
 	return state
 }
 
-func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, run *db.Run) ([]string, []string, bool, bool) {
+// The last result names each run whose verified head is in neither store, so
+// a report can say exactly which head failed; missingHeadDetail formats it.
+func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, run *db.Run) ([]string, []string, bool, bool, []string) {
 	if state == nil || run == nil {
-		return nil, nil, false, false
+		return nil, nil, false, false, nil
 	}
 	runs, err := s.DB.GetRunsByRepo(s.Repo.ID)
 	if err != nil {
-		return nil, nil, false, false
+		return nil, nil, false, false, nil
 	}
 	gateDir := strings.TrimSpace(s.GateDir)
 	if gateDir == "" {
-		return nil, nil, false, false
+		return nil, nil, false, false, nil
 	}
 	if _, err := os.Stat(gateDir); err != nil {
-		return nil, nil, false, false
+		return nil, nil, false, false, nil
 	}
 	gateHead, gateHeadExists, err := git.ExactRefTarget(ctx, gateDir, "refs/heads/"+state.Local.Branch)
 	if err != nil {
-		return nil, nil, false, false
+		return nil, nil, false, false, nil
 	}
 	var runIDs []string
 	var candidateHeads []string
+	var missingHeads []string
 	anyMissing := false
 	allEligible := true
 	var newerPushed *db.Run
@@ -1860,6 +1863,9 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 			compatible, err := recoveryAnchorCompatible(ctx, gateDir, candidate.ID, candidate.HeadSHA)
 			eligible = err == nil && compatible
 		}
+		if missing {
+			missingHeads = append(missingHeads, fmt.Sprintf("run %s head %s", candidate.ID, candidate.HeadSHA))
+		}
 		anyMissing = anyMissing || missing
 		allEligible = allEligible && eligible
 		runIDs = append(runIDs, candidate.ID)
@@ -1881,7 +1887,15 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 			}
 		}
 	}
-	return runIDs, candidateHeads, anyMissing, allEligible
+	return runIDs, candidateHeads, anyMissing, allEligible, missingHeads
+}
+
+// missingHeadDetail names the missing recorded heads and the two stores that
+// were consulted, so a custody report never implies that a present head, such
+// as the reported run's own, is the one that failed.
+func (s *Service) missingHeadDetail(missingHeads []string) string {
+	return fmt.Sprintf("recorded pipeline %s not found in the invoking worktree %s or the local gate %s",
+		strings.Join(missingHeads, ", "), s.workDir(), strings.TrimSpace(s.GateDir))
 }
 
 func unavailableRecoverySource(safety, message string) recoverySourceProof {

@@ -1159,6 +1159,52 @@ func TestInspectOffersKeepLocalWhenRecordedHeadIsMissing(t *testing.T) {
 	}
 }
 
+// TestMissingHeadReportNamesTheMissingRunAndStores pins the custody report's
+// truthfulness when the missing head belongs to an older stranded run while
+// the reported newer run's head is present in the gate, both as an object and
+// as the gate branch ref. The report must name the run and head that are
+// actually missing and the two stores consulted, never the present head.
+func TestMissingHeadReportNamesTheMissingRunAndStores(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	tree := mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}")
+	olderHead := mustRun(t, f.gate, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit-tree", tree, "-p", f.preserved, "-m", "older missing head")
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, olderHead); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.gate, "objects", olderHead[:2], olderHead[2:])); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	newest, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunHeadSHA(newest.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunStatusWithVerifiedHead(newest.ID, types.RunFailed, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("gate branch = %s, want the reported run's present head %s", got, f.preserved)
+	}
+
+	state := f.service.InspectCached(f.ctx)
+	if state.Pipeline.RunID != newest.ID || state.Safety != "blocked_recover_preserved_head_missing" {
+		t.Fatalf("stacked missing-head state = %#v", state)
+	}
+	for _, want := range []string{f.run.ID, olderHead, f.local, f.gate} {
+		if !strings.Contains(state.Error, want) {
+			t.Fatalf("missing-head report omits %q: %s", want, state.Error)
+		}
+	}
+	if strings.Contains(state.Error, f.preserved) || strings.Contains(state.Error, newest.ID) {
+		t.Fatalf("missing-head report names the present head or its run: %s", state.Error)
+	}
+}
+
 func TestInspectDoesNotOfferKeepLocalForUnverifiedMissingHead(t *testing.T) {
 	t.Parallel()
 
