@@ -74,6 +74,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	}
 
 	lineageTarget := ""
+	lineageUpstream := ""
 	// Stop before rebasing when the gated branch carries commits that live on
 	// the contributor's local default branch but were never pushed to
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
@@ -133,15 +134,22 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			remoteHasOwnLineage := remoteSHA != mergeBase
 			localContainsRemote := isAncestor(ctx, sctx.WorkDir, remoteSHA, "HEAD")
 			if remoteHasOwnLineage && !localContainsRemote {
+				localBase, err := git.Run(ctx, sctx.WorkDir, "merge-base", "HEAD", "origin/"+defaultBranch)
+				if err != nil {
+					return nil, fmt.Errorf("inspect local head against origin/%s before rebase: %w", defaultBranch, err)
+				}
 				lineageTarget = branchTarget
+				lineageUpstream = localBase
 				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, branchTarget))
 			}
 		}
 	}
 
 	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget)
+	upstream := ""
 	if lineageTarget != "" {
 		targets = []string{lineageTarget}
+		upstream = lineageUpstream
 	}
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
@@ -160,7 +168,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			if merging {
 				err = mergeWithAgent(ctx, sctx, target)
 			} else {
-				err = rebaseWithAgent(ctx, sctx, target)
+				err = rebaseWithAgent(ctx, sctx, target, upstream)
 			}
 			if err != nil {
 				return nil, err
@@ -192,7 +200,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		if merging {
 			conflictFiles, err = tryMerge(ctx, sctx, target)
 		} else {
-			conflictFiles, err = tryRebase(ctx, sctx, target)
+			conflictFiles, err = tryRebase(ctx, sctx, target, upstream)
 		}
 		if err != nil {
 			return nil, err
@@ -447,9 +455,10 @@ func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) boo
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
-// tryRebase attempts a rebase onto targetRef. Returns conflicted files when the
-// rebase stops on merge conflicts. The rebase is aborted before returning.
-func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
+// tryRebase attempts a rebase onto targetRef, replaying only the commits after
+// upstream when it is set. Returns conflicted files when the rebase stops on
+// merge conflicts. The rebase is aborted before returning.
+func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef, upstream string) ([]string, error) {
 	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return nil, err
@@ -459,7 +468,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err != nil {
+	if _, err := git.Run(ctx, sctx.WorkDir, rebaseOntoArgs([]string{"rebase", targetRef}, upstream)...); err != nil {
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 
@@ -472,7 +481,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 }
 
 // rebaseWithAgent performs a rebase and uses the agent to resolve any conflicts.
-func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
+func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef, upstream string) error {
 	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return err
@@ -482,7 +491,7 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	_, rebaseErr := git.Run(ctx, sctx.WorkDir, git.RestripRebaseArgs(targetRef)...)
+	_, rebaseErr := git.Run(ctx, sctx.WorkDir, rebaseOntoArgs(git.RestripRebaseArgs(targetRef), upstream)...)
 	if rebaseErr == nil {
 		return verifyRebaseStripped(ctx, sctx, targetRef)
 	}
@@ -555,6 +564,16 @@ Instructions:
 
 // verifyRebaseStripped refuses a completed fix-round rebase whose replayed
 // commits are not all trailer-free under the fleet strip.
+// rebaseOntoArgs turns rebase args ending in the target into
+// `--onto <target> <upstream>` when upstream is set.
+func rebaseOntoArgs(args []string, upstream string) []string {
+	if upstream == "" {
+		return args
+	}
+	target := args[len(args)-1]
+	return append(append([]string{}, args[:len(args)-1]...), "--onto", target, upstream)
+}
+
 func verifyRebaseStripped(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
 	if err := git.VerifyStrippedRange(ctx, sctx.WorkDir, targetRef+"..HEAD"); err != nil {
 		return fmt.Errorf("verify rebased commits are stripped of AI co-author trailers: %w", err)

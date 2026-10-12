@@ -150,6 +150,12 @@ func TestRebaseStep_UsesOwnRemoteLineageAfterLocalRebase(t *testing.T) {
 	if got := gitCmd(t, dir, "rev-parse", "origin/main"); got == head {
 		t.Fatalf("rebase silently selected origin/main instead of remote branch lineage: %s", got)
 	}
+	if replayed := gitCmd(t, dir, "log", "--format=%s", remoteFeatureHead+"..HEAD"); replayed != "" {
+		t.Fatalf("rebase replayed commits onto the remote lineage that the branch does not own:\n%s", replayed)
+	}
+	if changed := gitCmd(t, dir, "diff", "--name-only", "origin/main...HEAD"); changed != "feature.txt" {
+		t.Fatalf("branch diff against origin/main = %q, want only feature.txt", changed)
+	}
 }
 
 func TestRebaseStep_UnreadableTrackingRefStillUsesRemoteLineage(t *testing.T) {
