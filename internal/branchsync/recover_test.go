@@ -1203,6 +1203,21 @@ func TestInspectNamesUnincorporatedGateLineageDuringMissingRecovery(t *testing.T
 	if state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" {
 		t.Fatalf("next action = %#v", state.NextAction)
 	}
+
+	localHead := mustRun(t, f.local, "rev-parse", "HEAD")
+	recovered := f.service.Recover(f.ctx, true)
+	if recovered.Safety != "blocked_recover_unincorporated_remote_head" || recovered.Changed {
+		t.Fatalf("keep-local recovery = %#v, want refusal naming the unincorporated gate head", recovered)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != remoteHead {
+		t.Fatalf("gate head = %s, want unchanged %s", got, remoteHead)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != localHead {
+		t.Fatalf("local head = %s, want unchanged %s", got, localHead)
+	}
+	if run, err := f.db.GetRun(newer.ID); err != nil || run.CustodyReturnedAt != nil {
+		t.Fatalf("custody returned after refused keep-local: run=%#v err=%v", run, err)
+	}
 }
 
 func TestInspectNamesUnincorporatedGateLineageFromAWorktreeOnlyAnchor(t *testing.T) {

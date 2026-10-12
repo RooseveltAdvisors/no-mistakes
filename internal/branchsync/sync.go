@@ -708,6 +708,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			return blockedPlan(state, StatePipelineOwned, "blocked_recover_manual_reconciliation", "a stranded run has unverified or conflicting recovery evidence; reconcile it before returning branch custody")
 		}
 		if anyMissing {
+			if message, ok := s.unincorporatedGateHeadMessage(ctx, &state, run); ok {
+				return blockedPlan(state, StatePipelineOwned, "blocked_recover_unincorporated_remote_head", message)
+			}
 			return s.recoverKeepLocalAtCurrentHead(ctx, run, state, runIDs, candidateHeads)
 		}
 	}

@@ -73,11 +73,6 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}
 	}
 
-	// A rewritten local head normally makes forcePush true, which used to skip
-	// the branch fetch and then rebase only onto origin/<default>. When the
-	// configured push target has since acquired a separate branch lineage, that
-	// choice guarantees another non-fast-forward push. Inspect that lineage
-	// before choosing the force-push target.
 	lineageTarget := ""
 	// Stop before rebasing when the gated branch carries commits that live on
 	// the contributor's local default branch but were never pushed to
@@ -140,47 +135,6 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			if remoteHasOwnLineage && !localContainsRemote {
 				lineageTarget = branchTarget
 				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, branchTarget))
-			}
-		}
-	}
-	if forcePush && branch != "" && branch != defaultBranch {
-		privateRef := fmt.Sprintf("refs/no-mistakes/rebase-remote/%s", sctx.Run.ID)
-		if strings.TrimSpace(sctx.Run.ID) == "" {
-			privateRef = "refs/no-mistakes/rebase-remote/" + strings.ReplaceAll(branch, "/", "-")
-		}
-		remoteLineage := true
-		if err := git.FetchRemoteBranchToPrivateRef(ctx, sctx.WorkDir, pushRemote, branch, privateRef); err != nil {
-			// A branch that no longer exists on the remote carries no lineage
-			// to preserve and the push step's new-branch path recreates it, so
-			// only an existing head that cannot be fetched fails the inspection.
-			remoteHead, lsErr := git.LsRemote(ctx, sctx.WorkDir, pushRemote, "refs/heads/"+branch)
-			if lsErr == nil && remoteHead == "" {
-				remoteLineage = false
-			} else {
-				return nil, fmt.Errorf("inspect remote branch %q before rebase: fetch: %w", branch, err)
-			}
-		}
-		if remoteLineage {
-			defer func() {
-				_, _ = git.Run(context.WithoutCancel(ctx), sctx.WorkDir, "update-ref", "--no-deref", "-d", privateRef)
-			}()
-
-			remoteSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", privateRef+"^{commit}")
-			if err != nil {
-				return nil, fmt.Errorf("inspect remote branch %q before rebase: resolve fetched head: %w", branch, err)
-			}
-			mergeBase, err := git.Run(ctx, sctx.WorkDir, "merge-base", privateRef, "origin/"+defaultBranch)
-			if err != nil {
-				return nil, fmt.Errorf("inspect remote branch %q against origin/%s before rebase: %w", branch, defaultBranch, err)
-			}
-			remoteHasOwnLineage := remoteSHA != mergeBase
-			if sctx.Run.BaseSHA != "" && !git.IsZeroSHA(sctx.Run.BaseSHA) && isAncestor(ctx, sctx.WorkDir, remoteSHA, sctx.Run.BaseSHA) {
-				remoteHasOwnLineage = false
-			}
-			if remoteHasOwnLineage {
-				lineageTarget = privateRef
-				forcePush = false
-				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, privateRef))
 			}
 		}
 	}
