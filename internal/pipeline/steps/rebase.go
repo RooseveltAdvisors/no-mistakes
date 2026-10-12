@@ -134,12 +134,23 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			remoteHasOwnLineage := remoteSHA != mergeBase
 			localContainsRemote := isAncestor(ctx, sctx.WorkDir, remoteSHA, "HEAD")
 			if remoteHasOwnLineage && !localContainsRemote {
-				localBase, err := git.Run(ctx, sctx.WorkDir, "merge-base", "HEAD", "origin/"+defaultBranch)
+				baseFork, err := git.Run(ctx, sctx.WorkDir, "merge-base", "HEAD", "origin/"+defaultBranch)
 				if err != nil {
 					return nil, fmt.Errorf("inspect local head against origin/%s before rebase: %w", defaultBranch, err)
 				}
+				lineageFork, err := git.Run(ctx, sctx.WorkDir, "merge-base", "HEAD", branchTarget)
+				if err != nil {
+					return nil, fmt.Errorf("inspect local head against remote branch %q before rebase: %w", branch, err)
+				}
+				switch {
+				case isAncestor(ctx, sctx.WorkDir, lineageFork, baseFork):
+					lineageUpstream = baseFork
+				case isAncestor(ctx, sctx.WorkDir, baseFork, lineageFork):
+					lineageUpstream = lineageFork
+				default:
+					return nil, fmt.Errorf("local head shares unrelated history with origin/%s (%s) and remote branch %q (%s); refusing to pick which commits to replay", defaultBranch, baseFork, branch, lineageFork)
+				}
 				lineageTarget = branchTarget
-				lineageUpstream = localBase
 				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, branchTarget))
 			}
 		}
@@ -562,8 +573,6 @@ Instructions:
 	return verifyRebaseStripped(ctx, sctx, targetRef)
 }
 
-// verifyRebaseStripped refuses a completed fix-round rebase whose replayed
-// commits are not all trailer-free under the fleet strip.
 // rebaseOntoArgs turns rebase args ending in the target into
 // `--onto <target> <upstream>` when upstream is set.
 func rebaseOntoArgs(args []string, upstream string) []string {
@@ -574,6 +583,8 @@ func rebaseOntoArgs(args []string, upstream string) []string {
 	return append(append([]string{}, args[:len(args)-1]...), "--onto", target, upstream)
 }
 
+// verifyRebaseStripped refuses a completed fix-round rebase whose replayed
+// commits are not all trailer-free under the fleet strip.
 func verifyRebaseStripped(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
 	if err := git.VerifyStrippedRange(ctx, sctx.WorkDir, targetRef+"..HEAD"); err != nil {
 		return fmt.Errorf("verify rebased commits are stripped of AI co-author trailers: %w", err)
