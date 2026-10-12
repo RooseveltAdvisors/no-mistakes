@@ -134,22 +134,11 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			remoteHasOwnLineage := remoteSHA != mergeBase
 			localContainsRemote := isAncestor(ctx, sctx.WorkDir, remoteSHA, "HEAD")
 			if remoteHasOwnLineage && !localContainsRemote {
-				baseFork, err := git.Run(ctx, sctx.WorkDir, "merge-base", "HEAD", "origin/"+defaultBranch)
+				combined, err := git.Run(ctx, sctx.WorkDir, "commit-tree", branchTarget+"^{tree}", "-p", branchTarget, "-p", "origin/"+defaultBranch, "-m", "no-mistakes rebase upstream")
 				if err != nil {
-					return nil, fmt.Errorf("inspect local head against origin/%s before rebase: %w", defaultBranch, err)
+					return nil, fmt.Errorf("combine remote branch %q with origin/%s before rebase: %w", branch, defaultBranch, err)
 				}
-				lineageFork, err := git.Run(ctx, sctx.WorkDir, "merge-base", "HEAD", branchTarget)
-				if err != nil {
-					return nil, fmt.Errorf("inspect local head against remote branch %q before rebase: %w", branch, err)
-				}
-				switch {
-				case isAncestor(ctx, sctx.WorkDir, lineageFork, baseFork):
-					lineageUpstream = baseFork
-				case isAncestor(ctx, sctx.WorkDir, baseFork, lineageFork):
-					lineageUpstream = lineageFork
-				default:
-					return nil, fmt.Errorf("local head shares unrelated history with origin/%s (%s) and remote branch %q (%s); refusing to pick which commits to replay", defaultBranch, baseFork, branch, lineageFork)
-				}
+				lineageUpstream = combined
 				lineageTarget = branchTarget
 				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, branchTarget))
 			}

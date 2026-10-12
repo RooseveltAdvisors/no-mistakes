@@ -210,6 +210,79 @@ func TestRebaseStep_RemoteLineageKeepsARevertOfASharedCommit(t *testing.T) {
 	}
 }
 
+func setupRevertedSharedCommitRemote(t *testing.T) (dir, upstream, baseSHA, remoteHead string) {
+	t.Helper()
+	upstream = t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir = t.TempDir()
+	gitCmd(t, dir, "init", "-b", "main")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	writeFixtureFile(t, dir, "base.txt", "base\n")
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "base")
+	baseSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	writeFixtureFile(t, dir, "shared.txt", "shared\n")
+	gitCmd(t, dir, "add", "shared.txt")
+	gitCmd(t, dir, "commit", "-m", "shared feature commit")
+	gitCmd(t, dir, "revert", "--no-edit", "HEAD")
+	remoteHead = gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+	gitCmd(t, dir, "reset", "--hard", "HEAD~1")
+
+	gitCmd(t, dir, "checkout", "main")
+	writeFixtureFile(t, dir, "main.txt", "new main\n")
+	gitCmd(t, dir, "add", "main.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
+	return dir, upstream, baseSHA, remoteHead
+}
+
+func assertOnlyLocalWorkReplayedOntoRevert(t *testing.T, dir, upstream, baseSHA, remoteHead string) {
+	t.Helper()
+	writeFixtureFile(t, dir, "local.txt", "local\n")
+	gitCmd(t, dir, "add", "local.txt")
+	gitCmd(t, dir, "commit", "-m", "local work")
+	localHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, localHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("rebase onto remote lineage: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected conflict while preserving remote lineage: %s", outcome.Findings)
+	}
+	if replayed := gitCmd(t, dir, "log", "--no-merges", "--format=%s", remoteHead+"..HEAD"); replayed != "local work" {
+		t.Fatalf("replayed commits = %q, want only the local work", replayed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "shared.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the remote's revert of the shared commit was undone: stat err = %v", err)
+	}
+}
+
+func TestRebaseStep_RemoteLineageKeepsARevertAfterALocalRebase(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, remoteHead := setupRevertedSharedCommitRemote(t)
+	gitCmd(t, dir, "rebase", "main")
+	assertOnlyLocalWorkReplayedOntoRevert(t, dir, upstream, baseSHA, remoteHead)
+}
+
+func TestRebaseStep_RemoteLineageAcceptsALocalMergeOfTheBase(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, remoteHead := setupRevertedSharedCommitRemote(t)
+	gitCmd(t, dir, "merge", "--no-edit", "main")
+	assertOnlyLocalWorkReplayedOntoRevert(t, dir, upstream, baseSHA, remoteHead)
+}
+
 func TestRebaseStep_UnreadableTrackingRefStillUsesRemoteLineage(t *testing.T) {
 	t.Parallel()
 
