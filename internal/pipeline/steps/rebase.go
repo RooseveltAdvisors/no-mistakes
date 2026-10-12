@@ -174,6 +174,9 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 				return nil, fmt.Errorf("inspect remote branch %q against origin/%s before rebase: %w", branch, defaultBranch, err)
 			}
 			remoteHasOwnLineage := remoteSHA != mergeBase
+			if sctx.Run.BaseSHA != "" && !git.IsZeroSHA(sctx.Run.BaseSHA) && isAncestor(ctx, sctx.WorkDir, remoteSHA, sctx.Run.BaseSHA) {
+				remoteHasOwnLineage = false
+			}
 			if remoteHasOwnLineage {
 				lineageTarget = privateRef
 				forcePush = false
