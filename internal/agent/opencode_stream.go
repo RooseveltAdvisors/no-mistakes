@@ -13,6 +13,7 @@ func opencodeTokensToUsage(t *opencodeTokens) TokenUsage {
 		Reported:     true,
 	}
 	if t.Cache != nil {
+		u.InputTokens += t.Cache.Read + t.Cache.Write
 		u.CacheReadTokens = t.Cache.Read
 		u.CacheCreationTokens = t.Cache.Write
 		u.CacheCreationReported = true
@@ -31,6 +32,7 @@ func accumulateUsage(byMsg map[string]TokenUsage) TokenUsage {
 // parseOpencodeSSE processes the SSE stream from OpenCode's /global/event endpoint.
 func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 	var sawIdle bool
+	var streamErr error
 	err := parseSSE(r, func(ev sseEvent) bool {
 		if ev.Data == "" {
 			return true
@@ -53,6 +55,16 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		}
 
 		switch payload.Type {
+		case "session.error":
+			if props != nil && isThinkingToolChoiceConflict(props.Error) {
+				streamErr = errOpencodeThinkingToolChoiceConflict
+				return false
+			}
+			if props != nil && isForcedToolChoiceUnsupported(props.Error) {
+				streamErr = errOpencodeForcedToolChoiceUnsupported
+				return false
+			}
+
 		case "message.part.delta":
 			if props != nil && props.Field == "text" && props.PartID != "" && props.Delta != "" {
 				if state.filteredPartIDs[props.PartID] {
@@ -94,8 +106,11 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 					}
 					state.emitTextPartChunk(part, p.ID)
 				}
+				if isOpencodeToolPart(p.Type) {
+					state.toolInvoked = true
+				}
 				if p.Type == "step-finish" {
-					state.hadToolActivity = true
+					state.pendingStepSeparator = true
 					if p.MessageID != "" && p.Tokens != nil {
 						state.usageByMsg[p.MessageID] = opencodeTokensToUsage(p.Tokens)
 						state.usage = accumulateUsage(state.usageByMsg)
@@ -136,6 +151,9 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 	if err != nil {
 		return err
 	}
+	if streamErr != nil {
+		return streamErr
+	}
 	if !sawIdle {
 		// Stream ended without session.idle — not an error if message response
 		// will provide the final result
@@ -144,13 +162,13 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 }
 
 func (s *opencodeStreamState) emitSeparatorIfNeeded() {
-	if !s.hadToolActivity || s.onChunk == nil {
+	if !s.pendingStepSeparator || s.onChunk == nil {
 		return
 	}
 	if s.hasEmittedText {
 		s.onChunk("\n\n")
 	}
-	s.hadToolActivity = false
+	s.pendingStepSeparator = false
 }
 
 func (s *opencodeStreamState) emitTextPartChunk(part *opencodeTextPart, partID string) {

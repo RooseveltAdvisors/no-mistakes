@@ -12,6 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // managedServerOutput holds the writer used for managed-server stdout and
@@ -73,15 +76,11 @@ func getAvailablePort() (int, error) {
 // The process is not tied to ctx - it outlives individual Run calls and is stopped via shutdown().
 // ctx is only used for the health check timeout.
 // agentName tags the PID tracking file so crash-recovery can identify orphans.
-func startServerWithPort(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int, extraEnv ...[]string) (*managedServer, error) {
+func startServerWithPort(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int, environment runenv.Overlay, extraEnv ...[]string) (*managedServer, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
 	cmd.Stdin = nil
-	var env []string
-	if len(extraEnv) > 0 {
-		env = extraEnv[0]
-	}
-	cmd.Env = gitSafeEnv(cwd, env)
+	cmd.Env = gitSafeEnvWithOverlay(cwd, environment, extraEnv...)
 	out := currentManagedServerOutput()
 	cmd.Stdout = out // server stdout goes to the configured sink for debugging
 	cmd.Stderr = out
@@ -91,6 +90,7 @@ func startServerWithPort(ctx context.Context, agentName, bin string, args []stri
 		slog.Warn("managed agent server failed to start", "agent", agentName, "error", err)
 		return nil, fmt.Errorf("start server %s: %w", bin, err)
 	}
+	shellenv.RaiseStepOOMScore(cmd.Process.Pid)
 	slog.Info("managed agent server started", "agent", agentName, "pid", cmd.Process.Pid)
 
 	pidFile := writeServerPIDFile(currentServerPIDsDir(), ServerPIDInfo{

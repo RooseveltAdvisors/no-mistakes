@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
@@ -28,10 +29,7 @@ const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
-	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := effectivePRBaseBranch(sctx)
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
@@ -50,7 +48,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 
 	sctx.Log("fetching latest upstream state...")
 	if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
-		sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", defaultBranch, err))
+		return nil, fmt.Errorf("fetch base branch %q before rebase: %w", defaultBranch, err)
 	}
 	// Sync the push branch's remote-tracking ref only when we are about to rebase
 	// onto it (a normal push). On a force push we deliberately skip both the fetch
@@ -62,21 +60,26 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// when the remote carries an out-of-band commit - silently clobbering it
 	// (the original #281/#305 hazard, in the force-push path). Leaving it stale is
 	// what lets the push step's content check catch that case.
+	var branchFetchErr error
 	if !forcePush && branch != "" && branch != defaultBranch {
 		if strings.TrimSpace(sctx.Repo.ForkURL) == "" {
 			if err := fetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
 				sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", branch, err))
+				branchFetchErr = err
 			}
 		} else if err := git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, pushRemote, branch, branchTarget); err != nil {
 			sctx.LogFile(fmt.Sprintf("warning: could not fetch %s: %v", branchTarget, err))
+			branchFetchErr = err
 		}
 	}
 
+	lineageTarget := ""
+	lineageUpstream := ""
 	// Stop before rebasing when the gated branch carries commits that live on
 	// the contributor's local default branch but were never pushed to
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
-	// commits in the branch's history, so the PR would silently bundle another
-	// workstream's unpushed work. Surface it for a human decision instead.
+	// commits in the branch's history, so the PR may bundle another
+	// workstream's unpushed work. Surface the ambiguity for a human decision.
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
 		return outcome, nil
 	}
@@ -94,27 +97,111 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			Findings:      string(findingsJSON),
 		}, nil
 	}
+	if !forcePush && branch != "" && branch != defaultBranch {
+		remoteSHA := ""
+		if branchFetchErr == nil {
+			if sha, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", branchTarget+"^{commit}"); err == nil {
+				remoteSHA = sha
+			}
+		}
+		if remoteSHA == "" {
+			// The tracking ref cannot be trusted for this comparison - the
+			// branch fetch above failed (leaving a possibly stale ref) or the
+			// ref is unreadable - so the head is resolved from the remote
+			// itself: a branch that no longer exists has no lineage to compare
+			// and the default targets stand, while an existing head is imported
+			// read-only for the comparison, and a head that still cannot be
+			// compared fails the step instead of either target being picked
+			// silently.
+			remoteHead, lsErr := git.LsRemote(ctx, sctx.WorkDir, pushRemote, "refs/heads/"+branch)
+			if lsErr != nil {
+				return nil, fmt.Errorf("read remote head of %q before rebase: %w", branch, lsErr)
+			}
+			if remoteHead == "" {
+				remoteSHA = ""
+			} else if importErr := git.FetchRemoteRef(ctx, sctx.WorkDir, pushRemote, "refs/heads/"+branch, remoteHead); importErr != nil {
+				return nil, fmt.Errorf("remote branch %q is at %s but its head cannot be compared before rebase; refusing to pick a rebase target silently: %w", branch, remoteHead, importErr)
+			} else {
+				branchTarget = remoteHead
+				remoteSHA = remoteHead
+			}
+		}
+		if remoteSHA != "" {
+			mergeBase, mergeErr := git.Run(ctx, sctx.WorkDir, "merge-base", branchTarget, "origin/"+defaultBranch)
+			if mergeErr != nil {
+				return nil, fmt.Errorf("inspect remote branch %q against origin/%s before rebase: %w", branch, defaultBranch, mergeErr)
+			}
+			remoteHasOwnLineage := remoteSHA != mergeBase
+			localContainsRemote := isAncestor(ctx, sctx.WorkDir, remoteSHA, "HEAD")
+			if remoteHasOwnLineage && !localContainsRemote {
+				combined, err := git.Run(ctx, sctx.WorkDir, "commit-tree", branchTarget+"^{tree}", "-p", branchTarget, "-p", "origin/"+defaultBranch, "-m", "no-mistakes rebase upstream")
+				if err != nil {
+					return nil, fmt.Errorf("combine remote branch %q with origin/%s before rebase: %w", branch, defaultBranch, err)
+				}
+				lineageUpstream = combined
+				lineageTarget = branchTarget
+				sctx.Log(fmt.Sprintf("remote branch %s has its own lineage beyond merge-base %s; rebasing onto %s", branch, mergeBase, branchTarget))
+			}
+		}
+	}
 
 	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget)
+	upstream := ""
+	if lineageTarget != "" {
+		targets = []string{lineageTarget}
+		upstream = lineageUpstream
+	}
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
 		targets = forcePushRebaseTargets(branch, defaultBranch)
 	}
 
+	merging := mergesMovedBase(sctx)
+
 	if sctx.Fixing {
+		before, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, err
+		}
 		for _, target := range targets {
-			if err := rebaseWithAgent(ctx, sctx, target); err != nil {
+			var err error
+			if merging {
+				err = mergeWithAgent(ctx, sctx, target)
+			} else {
+				err = rebaseWithAgent(ctx, sctx, target, upstream)
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
-		return updateHeadSHA(ctx, sctx)
+		outcome, err := updateHeadSHA(ctx, sctx)
+		if err == nil {
+			if sctx.Run.HeadSHA == before {
+				outcome.FixSummary = NoChangesAppliedSummary
+				sctx.Log("no changes applied: branch already up to date")
+			} else {
+				outcome.FixSummary = changesAppliedSummary
+				if merging {
+					sctx.Log("merged upstream into branch")
+				} else {
+					sctx.Log("rebased branch onto upstream")
+				}
+			}
+		}
+		return outcome, err
 	}
 
-	// Normal mode: try all rebases, track which targets had conflicts
+	// Normal mode: try all integrations, track which targets had conflicts
 	var conflictTargets []string
 	var conflictFindings []Finding
 	for _, target := range targets {
-		conflictFiles, err := tryRebase(ctx, sctx, target)
+		var conflictFiles []string
+		var err error
+		if merging {
+			conflictFiles, err = tryMerge(ctx, sctx, target)
+		} else {
+			conflictFiles, err = tryRebase(ctx, sctx, target, upstream)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -124,14 +211,14 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 				conflictFindings = append(conflictFindings, Finding{
 					Severity:    "warning",
 					File:        file,
-					Description: fmt.Sprintf("merge conflict rebasing onto %s", target),
+					Description: fmt.Sprintf("merge conflict %s %s", integrationVerb(merging), target),
 				})
 			}
 		}
 	}
 
 	if len(conflictTargets) > 0 {
-		summary := fmt.Sprintf("conflict rebasing onto %s", strings.Join(conflictTargets, ", "))
+		summary := fmt.Sprintf("conflict %s %s", integrationVerb(merging), strings.Join(conflictTargets, ", "))
 		findingsJSON, _ := json.Marshal(Findings{Items: dedupeRebaseFindings(conflictFindings), Summary: summary})
 		return &pipeline.StepOutcome{
 			NeedsApproval: true,
@@ -169,6 +256,22 @@ func forcePushRebaseTargets(branch, defaultBranch string) []string {
 	return []string{"origin/" + defaultBranch}
 }
 
+// effectivePRBaseBranch resolves the integration and change-scoping base for
+// pipeline steps. Per-run overrides win over repo config; the repository default
+// remains the fallback when neither selects a separate PR target branch.
+func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
+	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
+	if runBase := runPRBaseBranch(sctx); runBase != "" {
+		defaultBranch = runBase
+	} else if sctx.Config != nil && strings.TrimSpace(sctx.Config.PR.BaseBranch) != "" {
+		defaultBranch = strings.TrimSpace(sctx.Config.PR.BaseBranch)
+	}
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	return defaultBranch
+}
+
 // detectBundledLocalDefaultCommits returns a blocking finding when the gated
 // branch carries commits that exist on the contributor's local default branch
 // but were never pushed to origin/<default>. In multi-session / monorepo setups
@@ -179,7 +282,9 @@ func forcePushRebaseTargets(branch, defaultBranch string) []string {
 //
 // It only flags commits the branch actually carries: it reads the local default
 // tip from the working repo, confirms that tip is ahead of origin/<default> and
-// is an ancestor of the branch HEAD, then enumerates the unpushed commits.
+// is a strict ancestor of the branch HEAD, then enumerates the unpushed commits.
+// Equal tips are the common commit-on-main-then-name-a-branch workflow, not
+// evidence of an additional bundled workstream.
 // Detection is best-effort - if the local default tip advanced past the branch
 // point, or the working repo cannot be read, it returns nil rather than guess.
 func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepContext, branch, defaultBranch string) *pipeline.StepOutcome {
@@ -216,21 +321,46 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		return nil
 	}
 
+	// A delivery branch created at local main's tip carries only that intended
+	// work, not an additional workstream beneath its own commits (#998).
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err == nil && head == localTip {
+		return nil
+	}
+
 	subjects, err := git.Run(ctx, sctx.WorkDir, "log", "--oneline", "--no-decorate", remoteRef+".."+localTip)
 	if err != nil || strings.TrimSpace(subjects) == "" {
 		return nil
 	}
 	commits := strings.Split(strings.TrimSpace(subjects), "\n")
-	files, _ := git.DiffNameOnly(ctx, sctx.WorkDir, remoteRef, localTip)
+	// Report the proposed PR, not a two-dot comparison that can count
+	// upstream-only changes as removals from an outdated local default tip.
+	base, baseErr := git.Run(ctx, sctx.WorkDir, "merge-base", remoteRef, "HEAD")
+	var files []string
+	var filesErr error
+	if baseErr == nil {
+		files, filesErr = git.DiffNameOnly(ctx, sctx.WorkDir, base, "HEAD")
+	}
+	fileEvidence := "PR file count unavailable"
+	if baseErr == nil && filesErr == nil {
+		fileEvidence = fmt.Sprintf("proposed PR changes %d file(s)", len(files))
+	}
 	firstFile := ""
 	if len(files) > 0 {
 		firstFile = files[0]
 	}
 
 	description := fmt.Sprintf(
-		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to origin/%s; rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to origin, or rebase your branch onto origin/%s, before gating.",
-		len(commits), defaultBranch, defaultBranch, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch,
+		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to origin/%s; these may be unintended bundled work (%s):\n- %s\n\nConfirm these commits belong in this PR before approving, or manually separate the intended work onto origin/%s before gating.",
+		len(commits), defaultBranch, defaultBranch, fileEvidence, strings.Join(commits, "\n- "), defaultBranch,
 	)
+	fixSummary := ""
+	if sctx.Fixing {
+		fixSummary = NoChangesAppliedSummary
+		const explanation = "no changes applied: bundled local-default commits require manual separation or explicit approval"
+		description += "\n\n" + explanation + "; the rebase conflict resolver cannot safely select commits to discard."
+		sctx.Log(explanation)
+	}
 	findingsJSON, _ := json.Marshal(Findings{
 		Items: []Finding{{
 			Severity:    "warning",
@@ -248,6 +378,7 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		NeedsApproval: true,
 		AutoFixable:   false,
 		Findings:      string(findingsJSON),
+		FixSummary:    fixSummary,
 	}
 }
 
@@ -324,9 +455,10 @@ func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) boo
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
-// tryRebase attempts a rebase onto targetRef. Returns conflicted files when the
-// rebase stops on merge conflicts. The rebase is aborted before returning.
-func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
+// tryRebase attempts a rebase onto targetRef, replaying only the commits after
+// upstream when it is set. Returns conflicted files when the rebase stops on
+// merge conflicts. The rebase is aborted before returning.
+func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef, upstream string) ([]string, error) {
 	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return nil, err
@@ -336,7 +468,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err != nil {
+	if _, err := git.Run(ctx, sctx.WorkDir, rebaseOntoArgs([]string{"rebase", targetRef}, upstream)...); err != nil {
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 
@@ -349,7 +481,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 }
 
 // rebaseWithAgent performs a rebase and uses the agent to resolve any conflicts.
-func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
+func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef, upstream string) error {
 	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return err
@@ -359,7 +491,7 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	_, rebaseErr := git.Run(ctx, sctx.WorkDir, git.RestripRebaseArgs(targetRef)...)
+	_, rebaseErr := git.Run(ctx, sctx.WorkDir, rebaseOntoArgs(git.RestripRebaseArgs(targetRef), upstream)...)
 	if rebaseErr == nil {
 		return verifyRebaseStripped(ctx, sctx, targetRef)
 	}
@@ -399,13 +531,15 @@ Instructions:
 		targetRef,
 		strings.Join(conflictFiles, "\n- "),
 	)
+	prompt += "\n" + agent.MemoryFilesConflictRule
 	if sctx.PreviousFindings != "" {
 		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
 	}
 	prompt += userIntentPromptSection(sctx)
+	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = testguidance.LateRepairPrompt(string(types.StepRebase), prompt)
 
-	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
+	_, err = sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: commitSummarySchema,
@@ -428,6 +562,16 @@ Instructions:
 	return verifyRebaseStripped(ctx, sctx, targetRef)
 }
 
+// rebaseOntoArgs turns rebase args ending in the target into
+// `--onto <target> <upstream>` when upstream is set.
+func rebaseOntoArgs(args []string, upstream string) []string {
+	if upstream == "" {
+		return args
+	}
+	target := args[len(args)-1]
+	return append(append([]string{}, args[:len(args)-1]...), "--onto", target, upstream)
+}
+
 // verifyRebaseStripped refuses a completed fix-round rebase whose replayed
 // commits are not all trailer-free under the fleet strip.
 func verifyRebaseStripped(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
@@ -435,6 +579,223 @@ func verifyRebaseStripped(ctx context.Context, sctx *pipeline.StepContext, targe
 		return fmt.Errorf("verify rebased commits are stripped of AI co-author trailers: %w", err)
 	}
 	return nil
+}
+
+// mergesMovedBase reports whether this run integrates a moved base with a merge
+// commit instead of rebasing onto it. The value is resolved config
+// (rebase.strategy), trusted-only for a repository, and defaults to rebasing.
+func mergesMovedBase(sctx *pipeline.StepContext) bool {
+	return sctx.Config != nil && sctx.Config.Rebase.Strategy == config.RebaseStrategyMerge
+}
+
+// integrationVerb names the shape in log lines and findings, so a run reads as
+// what it actually did rather than as the step's historical name.
+func integrationVerb(merging bool) string {
+	if merging {
+		return "merging"
+	}
+	return "rebasing onto"
+}
+
+// mergeArgs builds the merge invocation. --no-ff is deliberate even though
+// shouldSkipRebase already fast-forwards the strictly-behind case separately:
+// the whole point of this strategy is that the integration leaves a commit with
+// TWO parents behind, so whether a conflict resolution dropped content one side
+// introduced stays decidable afterwards from outside the pipeline. A merge that
+// silently fast-forwarded would leave nothing to compare.
+// --no-edit keeps git's own "Merge remote-tracking branch 'origin/main' into
+// <branch>" subject rather than inventing a second convention for the same
+// commit.
+func mergeArgs(targetRef string) []string {
+	return []string{"merge", "--no-ff", "--no-edit", targetRef}
+}
+
+// tryMerge is merge mode's counterpart to tryRebase: it attempts to merge
+// targetRef into the branch and returns the conflicted files when the merge
+// stops on conflicts, aborting before returning.
+func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
+	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	if err != nil {
+		return nil, err
+	}
+	if skip {
+		return nil, nil
+	}
+
+	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
+	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err != nil {
+		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+
+		if len(conflictFiles) == 0 {
+			return nil, fmt.Errorf("merge %s: %w", targetRef, err)
+		}
+		return conflictFiles, nil
+	}
+	return nil, nil
+}
+
+// mergeWithAgent is merge mode's counterpart to rebaseWithAgent: it merges
+// targetRef into the branch and hands any conflicts to the agent.
+//
+// The resolution prompt differs from the rebase one in the constraint it
+// carries. "Minimal necessary changes" is satisfied by deleting whichever side
+// is in the way, and a rebase leaves no evidence that anything was deleted. A
+// merge commit does, so the prompt asks for the resolution that commit can
+// actually be audited against: keep what both sides introduced.
+func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
+	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return nil
+	}
+
+	// Snapshot what the merge must prove before it runs. The target is pinned
+	// to a SHA here rather than checked by refname afterwards because an agent
+	// that fetches while resolving can advance the ref under us and fail a
+	// merge that actually landed.
+	preMergeHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("get pre-merge head: %w", err)
+	}
+	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
+	if err != nil {
+		return fmt.Errorf("get target head %s: %w", targetRef, err)
+	}
+
+	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
+	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err == nil {
+		return nil
+	}
+
+	conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
+	if len(conflictFiles) == 0 {
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+		return fmt.Errorf("merge %s failed (no conflicts detected)", targetRef)
+	}
+	sctx.Log("conflicts detected, asking agent to resolve...")
+
+	prompt := fmt.Sprintf(
+		`Resolve git merge conflicts. Merging %s into the current branch has conflicts.
+
+Current conflicted files:
+- %s
+
+Instructions:
+- Find all conflicting files and resolve the conflict markers (<<<<<<< ======= >>>>>>>).
+- Resolve ADDITIVELY. Keep both sides' introduced content; never delete content one side introduced to make the merge apply. Where both sides changed the same lines, combine them so neither side's contribution is lost.
+- Only where the two sides are genuinely mutually exclusive may one supersede the other, and then say which and why in the summary.
+- After resolving each file, stage it with: git add <file>
+- After all conflicts are resolved, conclude the merge with: git commit --no-edit
+- Do not modify any files that don't have conflicts.
+- Preserve the intent of both the current branch changes and the upstream changes.
+- Return JSON with a single "summary" field describing what you resolved.
+- Keep the summary under 10 words.`,
+		targetRef,
+		strings.Join(conflictFiles, "\n- "),
+	)
+	prompt += "\n" + agent.MemoryFilesConflictRule
+	if sctx.PreviousFindings != "" {
+		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
+	}
+	prompt += userIntentPromptSection(sctx)
+	prompt += executionContextPromptSection(sctx.WorkDir)
+	prompt = testguidance.LateRepairPrompt(string(types.StepRebase), prompt)
+
+	_, err = sctx.RunAgentContext(ctx, agent.RunOpts{
+		Prompt:     prompt,
+		CWD:        sctx.WorkDir,
+		JSONSchema: commitSummarySchema,
+		OnChunk:    sctx.LogChunk,
+	})
+	if err != nil {
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+		return fmt.Errorf("agent resolve conflicts: %w", err)
+	}
+
+	// An unconcluded merge would leave MERGE_HEAD set and the index conflicted,
+	// so the run would carry the reviewed head forward as if nothing happened.
+	if mergeInProgress(ctx, sctx.WorkDir) {
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+		return fmt.Errorf("agent did not complete the merge")
+	}
+
+	// A conflicted rebase is the other way the worktree can be left mid
+	// operation, and git sets no MERGE_HEAD for it: an agent that abandons the
+	// merge and rebases onto the same target hits the same conflict and stops
+	// with rebase state in place. Abort it first, or the restore below would
+	// move HEAD while the interrupted rebase survives underneath it.
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: a rebase was left in progress", targetRef))
+	}
+
+	// Concluded is not the same as merged. Requiring HEAD to have moved and to
+	// carry BOTH snapshots proves a merge happened, because shouldSkipRebase
+	// has already returned early unless preMergeHead and targetSHA are
+	// divergent: two divergent commits can only both be ancestors of HEAD if
+	// some commit in its history has two parents joining those lines. It also
+	// proves the reviewed head itself was not rewritten, which target ancestry
+	// alone never did and which the CI continuity rule and the attestation's
+	// head binding both depend on. Every way of ending the conflict without
+	// merging fails it: `git merge --abort` leaves HEAD where it was, and a
+	// rebase or a `git reset --hard` onto the target drops the reviewed head
+	// out of the history.
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("get merged head: %w", err))
+	}
+	if head == preMergeHead {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: the branch is still at %s", targetRef, preMergeHead))
+	}
+	if !isAncestor(ctx, sctx.WorkDir, preMergeHead, head) {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: the reviewed head %s is not in %s", targetRef, preMergeHead, head))
+	}
+	if !isAncestor(ctx, sctx.WorkDir, targetSHA, head) {
+		return restorePreMergeHead(ctx, sctx, preMergeHead, fmt.Errorf("agent did not merge %s into the branch: %s is not in %s", targetRef, targetSHA, head))
+	}
+
+	return nil
+}
+
+// restorePreMergeHead puts the worktree back on the reviewed head before a
+// shape guard's rejection is returned. Without it a rejected merge leaves the
+// branch on whatever the agent actually produced - a rebase of the reviewed
+// head, a reset onto the target, an unrelated commit - and the step fails while
+// the invalid head stays checked out, so any later hand-off, recovery, or
+// retry reads it as the branch's real state.
+//
+// It is fail-closed: a restore that does not land back exactly on
+// preMergeHead with a clean tree is reported as part of the returned error,
+// never swallowed, so nothing is described as recovered that was not.
+func restorePreMergeHead(ctx context.Context, sctx *pipeline.StepContext, preMergeHead string, cause error) error {
+	if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", preMergeHead); err != nil {
+		return fmt.Errorf("%w; restoring the branch to %s failed, the worktree is left at the rejected head: %v", cause, preMergeHead, err)
+	}
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("%w; restoring the branch to %s could not be verified: %v", cause, preMergeHead, err)
+	}
+	if head != preMergeHead {
+		return fmt.Errorf("%w; restoring the branch to %s left it at %s instead", cause, preMergeHead, head)
+	}
+	// HEAD reading as preMergeHead is not the same as the worktree being back on
+	// it: a reset performed while a rebase is interrupted moves HEAD and leaves
+	// the rebase underneath it, so the restore would otherwise report a
+	// recovery it never performed.
+	//
+	// HEAD ATTACHMENT is deliberately not verified here. The pipeline's run
+	// worktree is created detached (`git worktree add --detach`) and no step
+	// ever checks a branch out in it, so requiring an attached HEAD would
+	// report every correct restore as a failed one. Detachment carries no
+	// signal in this worktree; the reviewed-commit comparison above is what
+	// proves the restore.
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		return fmt.Errorf("%w; restoring the branch to %s left a rebase in progress", cause, preMergeHead)
+	}
+	return cause
 }
 
 // shouldSkipRebase checks whether a rebase onto targetRef can be skipped.
@@ -470,10 +831,22 @@ func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef
 }
 
 // rebaseInProgress returns true if a git rebase is currently in progress.
-// Uses git rev-parse --git-path which works for both regular repos and worktrees.
 func rebaseInProgress(ctx context.Context, workDir string) bool {
-	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
-		p, err := git.Run(ctx, workDir, "rev-parse", "--git-path", dir)
+	return gitPathExists(ctx, workDir, "rebase-merge", "rebase-apply")
+}
+
+// mergeInProgress returns true if a git merge is currently in progress -
+// started and not yet concluded by a commit or an abort.
+func mergeInProgress(ctx context.Context, workDir string) bool {
+	return gitPathExists(ctx, workDir, "MERGE_HEAD")
+}
+
+// gitPathExists reports whether any of the named paths exists inside the git
+// directory. It resolves them with git rev-parse --git-path, which works for
+// both regular repos and worktrees (where the git dir is not .git).
+func gitPathExists(ctx context.Context, workDir string, names ...string) bool {
+	for _, name := range names {
+		p, err := git.Run(ctx, workDir, "rev-parse", "--git-path", name)
 		if err != nil {
 			continue
 		}
@@ -539,11 +912,14 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 
 	// Check if the branch has any diff against the default branch.
 	// If the diff is empty (e.g. branch was already merged), skip remaining steps.
-	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
-	if defaultBranch == "" {
-		defaultBranch = "main"
+	// Execute already fetched the base branch (fail-closed) before integrating,
+	// so reuse that ref instead of fetching again after HEAD was rewritten and
+	// persisted: a failure here could not undo either.
+	defaultBranch := effectivePRBaseBranch(sctx)
+	baseSHA := mergeBaseWithDefaultBranch(ctx, sctx.WorkDir, defaultBranch)
+	if baseSHA == "" {
+		baseSHA = resolveBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
 	}
-	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
 	diff, err := git.Diff(ctx, sctx.WorkDir, baseSHA, "HEAD")
 	if err == nil && strings.TrimSpace(diff) == "" {
 		sctx.Log("empty diff after rebase, skipping remaining steps")

@@ -1,12 +1,14 @@
 ---
 title: Provider Integration
-description: Set up GitHub, GitLab, Bitbucket Cloud, or Azure DevOps for PR creation and CI monitoring.
+description: Set up GitHub, GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, Gitea, Cursor Origin, or a custom provider plugin for PR creation and CI monitoring.
 ---
 
-The PR and CI steps need to talk to your git host. Four hosts are supported:
-GitHub, GitLab, Bitbucket Cloud (`bitbucket.org`), and Azure DevOps
-(`dev.azure.com` and legacy `*.visualstudio.com`). Everything else
-short-circuits the PR and CI steps with `skipped`.
+The PR and CI steps need to talk to your git host. Seven hosts are supported:
+GitHub, GitLab, Forgejo, Bitbucket Cloud (`bitbucket.org`), Azure DevOps
+(`dev.azure.com` and legacy `*.visualstudio.com`), Gitea (almost always
+self-hosted), and Cursor Origin (`origin.cursor.com`). Any other host can be wired up on your machine with a
+[provider plugin](#custom-hosts-with-provider-plugins); without one, the PR and
+CI steps short-circuit with `skipped`.
 
 Provider integration is optional for the local gate. You only need it for the
 steps that happen after validation: opening or updating the PR, watching hosted
@@ -25,14 +27,16 @@ What you do not get is PR automation and CI monitoring.
 
 ## What each step needs
 
-| Step | GitHub | GitLab | Bitbucket Cloud | Azure DevOps |
-|---|---|---|---|---|
-| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
-| **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | same env vars | `az` CLI |
-| **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
-| **Mergeability polling** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
-| **Failed check log fetching** | `gh` CLI | `glab` CLI | supported | not yet |
-| **[Cancelled-check rerun](/no-mistakes/reference/repo-config/#cirerun_transient)** | `gh` CLI | not supported | not supported | not supported |
+| Step | GitHub | GitLab | Forgejo | Bitbucket Cloud | Azure DevOps | Gitea | Cursor Origin | [Provider Plugin](#custom-hosts-with-provider-plugins) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | `forgejo-axi`, authenticated | `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated | `tea` CLI, authenticated | `origin` CLI, authenticated | configured plugin CLI (`status`, `pr create`/`update`) |
+| **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | `forgejo-axi` | same env vars | `az` CLI | `tea` CLI | `origin` CLI | configured plugin CLI (`status`, `pr checks`) |
+| **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | `forgejo-axi` | not supported | `az` CLI | not supported | `origin` CLI | supported when plugin declares `mergeable_state` |
+| **Mergeability polling** | `gh` CLI | `glab` CLI | `forgejo-axi` | not supported | `az` CLI | not supported | `origin` CLI | supported when plugin declares `mergeable_state` |
+| **Failed check log fetching** | `gh` CLI | `glab` CLI | `forgejo-axi` when runtime routes are available | supported | not yet | supported | not yet | supported when plugin declares `failed_check_logs` |
+| **Review-bot findings and comments at the CI gate** | GitHub via `gh` CLI (check identity by app slug, comments from review threads) | GitLab via `glab` CLI (comments from unresolved discussion notes, matched by the bot's login; no check identity) | not supported | not supported | not supported | not supported | not supported | not supported |
+| **[Explicit issue closure](/no-mistakes/reference/cli/#closing-issues)** (`axi run --closes`) | `gh` CLI | `glab` CLI | not supported | not supported | not supported | not supported | not supported | not supported |
+| **[Transient-check rerun](/no-mistakes/reference/repo-config/#cirerun_transient)** (cancellations and pre-run infra failures) | `gh` CLI | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
 
 ## What changes when provider wiring is present
 
@@ -41,8 +45,10 @@ pushes to the configured target:
 
 - create or update the PR automatically
 - keep polling hosted CI until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses
-- fetch failing job logs for the CI auto-fix loop
-- on GitHub, GitLab, and Azure DevOps, watch mergeability and fix merge conflicts when possible
+- fetch failing job logs for the CI auto-fix loop when the provider exposes them
+- on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, and provider plugins that declare `mergeable_state`, watch mergeability and fix merge conflicts when possible
+
+Draft PR and MR creation is configurable for supported providers. The [global](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) and [per-repo](/no-mistakes/reference/repo-config/#providersgithubdraft_pull_requests) config references own provider support and behavior.
 
 ## GitHub
 
@@ -67,11 +73,16 @@ gh auth status
 `no-mistakes doctor` also checks for `gh` availability.
 For PR and workflow-run commands, no-mistakes passes the repository slug from the recorded upstream remote or PR URL to `gh`, so daemon-run commands do not depend on the daemon's current working directory.
 
+### Multiple GitHub or GitLab identities
+
+If one daemon serves repositories that require non-overlapping accounts, give each account an isolated CLI config directory and use account-specific host aliases in repository remotes, for example `git@github-personal:you/project.git`. Then map those raw host tokens with global [`forge_profiles`](/no-mistakes/reference/global-config/#forge_profiles). The reference owns the configuration, validation, compatibility, and fail-closed routing contract.
+
 **What you get:**
 
 - PR creation and update on pushes
 - CI check polling with exponential backoff (30s → 60s → 120s) until the PR is merged, closed, or the configured `ci_timeout` idle window elapses
 - Failed job log fetching (`gh run view --log-failed`) for the CI auto-fix step
+- A red Greptile check parked as `ask-user` CI findings carrying its unresolved review-thread comments, which are also supplied to CI repair prompts (a green or not-yet-registered one too under [`ci.review_bot_comments: always`](/no-mistakes/reference/repo-config/#cireview_bot_comments)); see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for filtering and prompt-safety details
 - PR mergeability polling, and agent-driven resolution when the provider reports an actual merge conflict
 
 ### GitHub fork contributions
@@ -84,12 +95,17 @@ git remote set-url origin git@github.com:parent-owner/repo.git
 no-mistakes init --fork-url git@github.com:your-user/repo.git
 ```
 
-With this setup, the push and CI auto-fix push steps update the fork, while the PR and CI steps stay scoped to the parent repository.
+With this setup, pipeline pushes update the fork, including CI repairs whether they are published immediately or first revalidated under [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs), while the PR and CI steps stay scoped to the parent repository.
 The GitHub PR step opens PRs with a fork-qualified head such as `your-user:feature-branch`.
 Re-running `no-mistakes init` later preserves the stored fork URL unless you pass a new `--fork-url`.
 
 Fork routing currently requires both `origin` and `--fork-url` to be GitHub remotes with owner/repo paths.
-GitLab and Bitbucket fork MR/PR routing are not implemented yet; if a legacy or manually edited repo record has `fork_url` set for those providers, PR creation skips instead of opening an unsafe self PR.
+GitLab, Forgejo, Bitbucket, Azure DevOps, Gitea, Cursor Origin, and provider plugins do not implement fork MR/PR routing yet; if a legacy or manually edited repo record has `fork_url` set for those providers, PR creation skips instead of opening an unsafe self PR.
+
+#### Workflow-file changes require the `workflow` scope
+
+If your branch touches a `.github/workflows/*.yml` or `*.yaml` file, the push to your fork requires a GitHub credential with the `workflow` scope; GitHub rejects it with `refusing to allow an OAuth App to create or update workflow ... without workflow scope` when the stored token lacks it.
+See [Troubleshooting](/no-mistakes/guides/troubleshooting/#push-fails-with-refusing-to-allow-an-oauth-app-to-create-or-update-workflow--without-workflow-scope) for the recovery steps.
 
 ## GitLab
 
@@ -111,6 +127,28 @@ glab auth login
 - CI pipeline status polling until the merge request is merged, closed, or the configured `ci_timeout` idle window elapses
 - Failed job trace fetching (`glab ci trace`) for the CI auto-fix step
 - Merge-conflict polling and auto-fix, same as GitHub
+- A supported review bot's unresolved merge request discussion notes as `ask-user` CI findings under [`ci.review_bot_comments: always`](/no-mistakes/reference/repo-config/#cireview_bot_comments) (see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the identity and filtering rules)
+- Explicit issue closure through `axi run --closes`; the reference is rendered as a `Closes` line in the merge request description and verified on the live merge request. A cross-project reference may nest under subgroups (`group/subgroup/project#95`), and the same nested form is refused on a provider that would read it as a different repository's reference
+
+When no-mistakes updates an existing merge request, it reads the live title and preserves any GitLab draft marker. If `glab mr view` fails or returns an empty title, the update stops instead of risking a change from draft to ready.
+
+## Forgejo
+
+Install [`forgejo-axi`](https://github.com/escidmore/forgejo-axi) and make it available on `PATH`. It currently installs from source with Node.js 20 or newer; set [`forgejo_axi_path`](/no-mistakes/reference/global-config/#forgejo_axi_path) when the executable lives elsewhere.
+
+Give the daemon a Forgejo token through either the generic `FORGEJO_TOKEN` variable or forgejo-axi's host-scoped token variable. Configure `FORGEJO_BASE_URL` for SSH origins and unrecognized self-hosted HTTPS hostnames. When the instance serves SSH from another hostname - its own `SSH_DOMAIN` setting, for example `ssh.forgejo.example` beside a web host of `forgejo.example` - also set [`FORGEJO_SSH_DOMAIN`](/no-mistakes/reference/environment/#forgejo_ssh_domain) to that hostname, or the SSH origin cannot be matched to the configured instance. The [environment reference](/no-mistakes/reference/environment/#forgejo_base_url) owns the exact base-URL and host-key rules.
+
+Verify without mutating a deployed Forgejo instance:
+
+```sh
+FORGEJO_BASE_URL=https://forgejo.example forgejo-axi status --json
+```
+
+`no-mistakes` delegates PR identity, lifecycle, commit-status and required-context evaluation, mergeability, and merged proof to forgejo-axi's stable JSON commands. Capabilities are runtime-probed from the server instead of guessed from a major version.
+
+Failed-log retrieval uses forgejo-axi's stable `run view --log-failed --json` command only when the runtime probe advertises commit statuses, Actions runs, run jobs, and job logs. `no-mistakes` accepts only a failing status's canonical native Actions target, verifies the exact run and freshly polled PR head, validates every returned job's run identity, and returns non-empty failed-job logs in deterministic order under the aggregate 1 MiB ceiling. Live testing against Forgejo 16.0.1 proves identity-matched retrieval through those routes. On Forgejo 15.0.5, commit-status gating, mergeability checks, and merged-state proof remain available when job and log routes are unavailable.
+
+Fork PR routing is not implemented for Forgejo; a configured `fork_url` makes the PR step skip rather than opening a self PR.
 
 ## Bitbucket Cloud
 
@@ -137,7 +175,7 @@ Get an API token from [Bitbucket account settings](https://bitbucket.org/account
 - PR mergeability polling
 - Merge-conflict auto-fix
 
-These are GitHub, GitLab, and Azure DevOps only right now.
+These are GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, and provider plugins (declaring `mergeable_state`) only right now.
 
 ## Azure DevOps
 
@@ -169,11 +207,11 @@ well as their SSH forms (`git@ssh.dev.azure.com:v3/...`).
 
 **What you get:**
 
-- PR creation and update (`az repos pr create` / `update`); Azure DevOps caps
-  PR descriptions at 4000 characters, so the pipeline builds the body within
-  that budget and applies a final truncation backstop with a visible marker.
+- PR creation and update (`az repos pr create` / `update`).
   See the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) for
-  section composition and truncation behavior.
+  ordinary description composition and truncation, and
+  [`pr.template`](/no-mistakes/reference/repo-config/#prtemplate) for
+  author-preserving publication and its provider limits.
 - CI status polling - Azure branch policy evaluations (build validation and
   status checks) are read via `az repos pr policy list` until the PR is
   completed, abandoned, or the configured `ci_timeout` idle window elapses
@@ -183,7 +221,83 @@ well as their SSH forms (`git@ssh.dev.azure.com:v3/...`).
 
 - Failed check log fetching for the CI auto-fix step (the `az` CLI has no
   first-class build-log command)
-- Fork PR routing (same as GitLab and Bitbucket)
+- Fork PR routing (same as all non-GitHub providers)
+
+## Gitea
+
+Gitea uses `tea`, its official CLI. Install it and log in with a token:
+
+```sh
+# see https://gitea.com/gitea/tea for install options (Homebrew, packages, or a release binary)
+
+tea logins add --url https://your-gitea.example.com --token your-token --name your-instance
+```
+
+Create a token from **Settings → Applications → Manage Access Tokens** on your Gitea instance, with read/write `repository` and `issue` scopes.
+
+Verify:
+
+```sh
+tea logins list
+```
+
+**What you get:**
+
+- PR creation and update (`tea pulls create`/`edit`)
+- CI status polling through Gitea Actions until the PR is merged or closed, or the configured `ci_timeout` idle window elapses. Job-level pass/fail comes from Gitea's Actions REST API (`GET .../actions/runs/{run}/jobs`), reached through `tea api` (which reuses the same stored login/token, so no separate HTTP client or credential is needed) - `tea`'s own `--output json` on `actions runs view --jobs` reports each job's run/queued/completed status but not its pass/fail conclusion.
+- Failed job log fetching (`tea actions runs logs`) for the CI auto-fix step
+
+**What you don't get (yet):**
+
+- PR mergeability polling and merge-conflict auto-fix. Gitea's PR `mergeable` field has a documented upstream reliability bug ([go-gitea/gitea#25849](https://github.com/go-gitea/gitea/issues/25849)) that can stick `false` after a conflict is actually resolved, so no-mistakes declines the capability rather than trust it - the same posture as Bitbucket Cloud.
+- Fork PR routing (same as all non-GitHub providers)
+- [Transient-check rerun](/no-mistakes/reference/repo-config/#cirerun_transient)
+
+Gitea Actions shipped in Gitea 1.19 (2023); older instances have no Actions API to poll. As with any repository with no CI, declare `no_ci: true` on the trusted default branch so the CI step does not wait for checks that will never appear - see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci).
+
+### Self-hosted Gitea
+
+Nearly every real Gitea instance is self-hosted at an arbitrary hostname with no `gitea` marker in it at all, so detection cannot use a substring match the way `gitlab.com`/`github.com` do. Instead, `no-mistakes` consults `tea`'s own login config (`config.yml`, under `$XDG_CONFIG_HOME/tea` or `~/.config/tea`) and treats the upstream as Gitea if its host matches a configured login's `url` or `ssh_host`.
+
+Running `tea logins add --url https://your-gitea.example.com --token <token> --name <name>` is enough to make detection succeed; if `tea` has no login for the host, detection fails closed and the upstream is treated as unsupported.
+
+Because `tea` infers "which instance" from the current directory's git remote - context the daemon's detached worktree does not have - every `tea` invocation `no-mistakes` makes carries `--login <name>` explicitly, resolved from the matched login's name at request time.
+
+## Cursor Origin
+
+Cursor Origin is Cursor's git forge. Git remotes look like
+`https://origin.cursor.com/{owner}/{repo}.git`; the web PR URL is
+`https://cursor.com/codebase/{owner}/{repo}/pull/{n}`. Both detect as Origin.
+Origin's API (`api.cursor.com/v1/origin`) is not GitHub-compatible, so do not
+point `gh` at `origin.cursor.com`.
+
+Install the Origin CLI and authenticate:
+
+```sh
+origin auth login
+origin auth status
+```
+
+**What you get:**
+
+- PR creation and update (`origin pr create` / `origin pr edit`). The Origin CLI
+  defaults new changes to draft; no-mistakes always passes `--status` explicitly
+  (`open` unless `providers.origin.draft_pull_requests` is true).
+- CI check polling through `origin pr checks` until the PR is merged or closed,
+  or the configured `ci_timeout` idle window elapses.
+- Mergeability polling from `origin pr view --json mergeability`, and
+  merge-conflict auto-fix when Origin reports `hasMergeConflicts`, conflicted
+  paths, or a conflict verdict under the nested `mergeability.mergeability`.
+
+**What you don't get (yet):**
+
+- Failed check log fetching (the Origin CLI has no log-body command)
+- Fork PR routing
+- [Transient-check rerun](/no-mistakes/reference/repo-config/#cirerun_transient)
+- Review-bot findings at the CI gate
+
+Every `origin` invocation carries `--repo owner/repo` so the daemon's detached
+worktree does not have to infer the repository from its working directory.
 
 ## Self-hosted GitHub/GitLab
 
@@ -209,19 +323,63 @@ The GitLab backend is pinned against `glab v1.5x`. Self-hosted detection and the
 
 ## SSH host aliases
 
-SSH remotes that use a host alias from your SSH configuration (for example `git@github-personal:owner/repo` or `git@gitlab-work:group/repo`, where `github-personal`/`gitlab-work` map to a real `HostName` via `~/.ssh/config`) are supported. `no-mistakes` resolves the alias through `ssh -G` to its real host name and uses that host only for provider detection and for scoping the provider CLI (`gh`/`glab`) to the right instance. The original Git remote URL is left untouched, so authentication and pushes continue to use the alias exactly as your SSH configuration expects.
+SSH remotes that use a host alias from your SSH configuration (for example `git@github-personal:owner/repo` or `git@gitlab-work:group/repo`, where `github-personal`/`gitlab-work` map to a real `HostName` via `~/.ssh/config`) are supported. `no-mistakes` resolves the alias through `ssh -G` to its real host name and uses that host only for provider detection and identity checks, including scoping `gh` or `glab` to the right instance and matching an SSH Forgejo remote to `FORGEJO_BASE_URL`. `ssh.github.com` and `altssh.gitlab.com` are rewritten to `github.com` and `gitlab.com` before provider detection and `gh`/`glab` host scoping. The original Git remote URL is left untouched, so the URL used for push stays the user's alias and authentication continues to use it exactly as the SSH configuration expects.
 
 If `ssh -G` is unavailable or the alias does not resolve, detection falls back to the literal host in the remote URL rather than failing the run.
 
+## Custom hosts with provider plugins
+
+For a host no-mistakes does not ship a provider for - a company-internal forge,
+Google Cloud Secure Source Manager, or anything else with an API - write a small
+AXI-shaped CLI that implements the [provider plugin protocol](/no-mistakes/reference/provider-plugin-protocol/)
+and register it in your global config. Nothing about the host needs to live in
+no-mistakes or in the repository:
+
+```yaml
+# ~/.no-mistakes/config.yaml
+provider_plugins:
+  ssm:
+    command: ~/bin/nm-ssm-plugin
+    hosts: ["*.sourcemanager.dev"]
+```
+
+no-mistakes drives the plugin the way it drives `forgejo-axi`: one process per
+operation, a subcommand plus `--flag=value` arguments and `--json`, and one
+JSON document on stdout (PR bodies arrive in a private `--body-file`). Six
+subcommands are required (`status`, `pr find`, `pr create`, `pr update`,
+`pr view`, `pr checks`); mergeability, failed-log fetching, merged proof, and
+PR retargeting are optional capabilities the plugin declares in `status`.
+
+**What you get:**
+
+- PR creation and update, including [`pr.template`](/no-mistakes/reference/repo-config/#prtemplate) and pre-push attestation
+- CI check polling until the PR is merged or closed, or the configured `ci_timeout` idle window elapses
+- Failed-check log fetching, mergeability polling, merge-conflict auto-fix, and merged-at-head proof, when the plugin declares them
+
+**What you don't get:**
+
+- Fork PR routing, review-bot findings, transient-check reruns, and `--closes` (a plugin declares neither the review-comment nor the closing-reference capability)
+
+no-mistakes validates every plugin answer - PR identity, URL shape, check
+buckets, and merged-proof head - and fails closed on anything malformed, on a
+protocol version mismatch, and on a timeout, so a buggy plugin cannot open a
+duplicate PR, certify the wrong commit, or turn a broken integration into a
+skipped step. A plugin that reports it cannot serve the repository (for
+example, not authenticated) skips the PR and CI steps with its message, like
+a built-in provider whose CLI is logged out. The
+[global config reference](/no-mistakes/reference/global-config/#provider_plugins)
+owns host matching, precedence, and the trust boundary: plugins are global-only
+and a repository can never configure one.
+
 ## Unsupported hosts
 
-If your upstream isn't GitHub, GitLab, Bitbucket Cloud, or Azure DevOps:
+If your upstream isn't GitHub, GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, Gitea, or Cursor Origin, and no provider plugin claims its host:
 
 - The **push** step still runs - `no-mistakes` pushes through git to the configured target like any other remote.
 - The **PR** step marks itself as `skipped`.
 - The **CI** step marks itself as `skipped`.
 
-Everything before push (rebase, review, test, document, lint) still works regardless of host. If your host has a CLI that exposes CI status and PR state, open an issue - new providers are straightforward to add.
+Everything before push (rebase, review, test, document, lint) still works regardless of host. To add PR and CI support, write a [provider plugin](#custom-hosts-with-provider-plugins).
 
 ## Checking what's wired up
 
@@ -229,8 +387,8 @@ Everything before push (rebase, review, test, document, lint) still works regard
 no-mistakes doctor
 ```
 
-`doctor` checks `gh` and `az` availability. For GitLab, confirm `glab` is installed and authenticated. For Bitbucket Cloud, confirm the two env vars are set in the environment the daemon runs under. For Azure DevOps, confirm the `azure-devops` extension is installed (`az extension show --name azure-devops`) and a PAT is available.
+`doctor` checks `gh`, `az`, and `origin` availability. It also validates every configured forge profile, including its provider config, target host, and online authentication, and checks that every configured provider plugin's command resolves. Without profiles, confirm `glab` is installed and authenticated for GitLab. For Forgejo, run `FORGEJO_BASE_URL=<host> forgejo-axi status --json` from the daemon's environment. For Bitbucket Cloud, confirm the two env vars are set in that environment. For Azure DevOps, confirm the `azure-devops` extension is installed (`az extension show --name azure-devops`) and a PAT is available. For Gitea, confirm `tea` is installed and has a login configured for your instance (`tea logins list`). For Cursor Origin, confirm `origin auth status` succeeds.
 
 :::note
-When the daemon runs through a managed service (launchd, systemd, Task Scheduler), it reloads environment from your login shell on macOS and Linux so `gh` auth and `NO_MISTAKES_BITBUCKET_*` vars are picked up, and it augments `PATH` with common binary directories. If credentials or PATH-derived tools are missing, check `~/.no-mistakes/logs/daemon.log` for a login-shell environment resolution warning. On Windows it reuses the current process environment.
+Provider CLIs and credentials inherit the daemon's startup environment. If credentials or PATH-derived tools are missing, check `~/.no-mistakes/logs/daemon.log` for a login-shell environment resolution warning, then see [Environment the daemon sees](/no-mistakes/reference/environment/#environment-the-daemon-sees) for the platform-specific resolution and restart behavior.
 :::

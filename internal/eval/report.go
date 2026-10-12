@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"sort"
@@ -17,13 +18,20 @@ type Interval struct {
 
 // CandidateReport is one locally observed candidate slice.
 type CandidateReport struct {
-	Cohort        string
-	Summary       EvaluationSummary
-	RepeatCount   int
-	Confidence    *Interval
-	AverageTokens *float64
-	AverageWallMS float64
-	OnFrontier    bool
+	Cohort      string
+	Summary     EvaluationSummary
+	RepeatCount int
+	Confidence  *Interval
+	// AverageTokens is the honest per-replay total: fresh-input + output plus
+	// cache-read and cache-write where the adapter reported them. Cache reads
+	// dominate review cost by orders of magnitude, so ranking the
+	// recall-vs-cost frontier on fresh input alone would crown whichever
+	// provider cached hardest as cheapest.
+	AverageTokens           *float64
+	AverageCacheReadTokens  *float64
+	AverageCacheWriteTokens *float64
+	AverageWallMS           float64
+	OnFrontier              bool
 }
 
 // Report loads every local evaluation result grouped by candidate. It never
@@ -54,8 +62,10 @@ func Report(store *Store) ([]CandidateReport, error) {
 			Confidence:    confidenceInterval(candidate, rows),
 			AverageWallMS: averageWallMS(rows),
 		}
-		if cost, ok := averageTokens(rows); ok {
-			report.AverageTokens = &cost
+		if total, cacheRead, cacheWrite, ok := averageTokens(rows); ok {
+			report.AverageTokens = &total
+			report.AverageCacheReadTokens = &cacheRead
+			report.AverageCacheWriteTokens = &cacheWrite
 		}
 		reports = append(reports, report)
 	}
@@ -73,7 +83,7 @@ func (s *Store) evaluations() ([]Evaluation, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("eval registry is closed")
 	}
-	rows, err := s.db.Query(`SELECT path FROM evaluations ORDER BY completed_at, id`)
+	rows, err := s.db.Query(`SELECT path, input_tokens, fresh_input_tokens, cache_read_tokens, cache_write_tokens FROM evaluations ORDER BY completed_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list eval results: %w", err)
 	}
@@ -81,13 +91,21 @@ func (s *Store) evaluations() ([]Evaluation, error) {
 	var result []Evaluation
 	for rows.Next() {
 		var path string
-		if err := rows.Scan(&path); err != nil {
+		var input, fresh int64
+		var cacheRead, cacheWrite sql.NullInt64
+		if err := rows.Scan(&path, &input, &fresh, &cacheRead, &cacheWrite); err != nil {
 			return nil, fmt.Errorf("scan eval result: %w", err)
 		}
 		var evaluation Evaluation
 		if err := readJSON(path, &evaluation); err != nil {
 			return nil, fmt.Errorf("read eval result: %w", err)
 		}
+		evaluation.InputTokens = input
+		evaluation.FreshInputTokens = fresh
+		evaluation.CacheReadTokens = cacheRead.Int64
+		evaluation.CacheWriteTokens = cacheWrite.Int64
+		// A skipped historical backfill cannot certify the token total.
+		evaluation.TokensReported = evaluation.TokensReported && cacheRead.Valid && cacheWrite.Valid
 		result = append(result, evaluation)
 	}
 	if err := rows.Err(); err != nil {
@@ -115,18 +133,21 @@ func averageWallMS(rows []Evaluation) float64 {
 	return float64(total) / float64(len(rows))
 }
 
-func averageTokens(rows []Evaluation) (float64, bool) {
+func averageTokens(rows []Evaluation) (total, cacheRead, cacheWrite float64, ok bool) {
 	if len(rows) == 0 {
-		return 0, false
+		return 0, 0, 0, false
 	}
-	var total int64
+	var freshAndOutput, reads, writes int64
 	for _, row := range rows {
 		if !row.TokensReported {
-			return 0, false
+			return 0, 0, 0, false
 		}
-		total += row.FreshInputTokens + row.OutputTokens
+		freshAndOutput += row.FreshInputTokens + row.OutputTokens
+		reads += row.CacheReadTokens
+		writes += row.CacheWriteTokens
 	}
-	return float64(total) / float64(len(rows)), true
+	n := float64(len(rows))
+	return float64(freshAndOutput+reads+writes) / n, float64(reads) / n, float64(writes) / n, true
 }
 
 func confidenceInterval(_ string, rows []Evaluation) *Interval {
@@ -195,6 +216,9 @@ func markFrontier(reports []CandidateReport) {
 }
 
 // SetSummary lets users inspect corpus coverage before an eval consumes tokens.
+// SelfScore is the recorded source reviews of the set scored against their own
+// gold (see SelfScoreRecordedReviews); it is computed from already-captured
+// local files, never from a fresh replay.
 type SetSummary struct {
 	Name           string
 	Cases          int
@@ -207,10 +231,26 @@ type SetSummary struct {
 	PinCount       int
 	Cap            int
 	Warning        string
-	Composition    map[string]int
+	Composition    []CompositionRow
+	SelfScore      EvaluationSummary
 }
 
-// InspectSets summarizes all logical sets and their diversified mix.
+// CompositionRow is one stratum bucket of a case set: the same axes the
+// diversified holdout stratifies on.
+type CompositionRow struct {
+	// Repo is the repository's display identity: its resolved name when the
+	// store was given one (see Store.SetRepoNames), else the short fingerprint.
+	Repo        string
+	Language    string
+	Size        string
+	Severity    string
+	FindingType string
+	Cases       int
+}
+
+// InspectSets summarizes all logical sets and their diversified mix. It reads
+// only local registry rows and captured case files, so it stays instant no
+// matter how expensive a replay of the same sets would be.
 func InspectSets(store *Store) ([]SetSummary, error) {
 	sets := []string{"all", "labeled", "diversified", "tune"}
 	all, err := store.ListCases("all")
@@ -223,13 +263,17 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 			labeledCount++
 		}
 	}
+	queuedByCase, err := store.pendingFindingCounts()
+	if err != nil {
+		return nil, err
+	}
 	result := make([]SetSummary, 0, len(sets))
 	for _, name := range sets {
 		cases, err := store.ListCases(name)
 		if err != nil {
 			return nil, err
 		}
-		summary := SetSummary{Name: name, Cases: len(cases), Composition: map[string]int{}, Cap: store.diversifiedSize}
+		summary := SetSummary{Name: name, Cases: len(cases), Cap: store.diversifiedSize, SelfScore: SelfScoreRecordedReviews(cases)}
 		if name == "diversified" {
 			if n, err := store.pinCount(); err == nil {
 				summary.PinCount = n
@@ -241,6 +285,14 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 		if name == "tune" && len(cases) == 0 && labeledCount > 0 {
 			summary.Warning = "tune is empty; do not fit matcher thresholds on diversified"
 		}
+		type compositionKey struct {
+			repoFingerprint string
+			language        string
+			size            string
+			severity        string
+			findingType     string
+		}
+		composition := map[compositionKey]int{}
 		for _, c := range cases {
 			if c.Labels.HasGold() {
 				summary.GoldCases++
@@ -257,14 +309,89 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 			} else {
 				summary.Unlabeled++
 			}
-			summary.QueuedFindings += c.Labels.QueuedCandidateFindings
+			summary.QueuedFindings += queuedByCase[c.ID]
 			language, size, severity := caseComposition(c)
-			ftype := findingType(c)
-			summary.Composition["repo="+shortFingerprint(c.RepoFingerprint)+", language="+language+", size="+size+", severity="+severity+", type="+ftype]++
+			composition[compositionKey{
+				repoFingerprint: c.RepoFingerprint,
+				language:        language,
+				size:            size,
+				severity:        severity,
+				findingType:     findingType(c),
+			}]++
 		}
+		rows := make([]CompositionRow, 0, len(composition))
+		for key, n := range composition {
+			rows = append(rows, CompositionRow{
+				Repo:        store.repoDisplay(key.repoFingerprint),
+				Language:    key.language,
+				Size:        key.size,
+				Severity:    key.severity,
+				FindingType: key.findingType,
+				Cases:       n,
+			})
+		}
+		summary.Composition = sortedCompositionRows(rows)
 		result = append(result, summary)
 	}
 	return result, nil
+}
+
+func sortedCompositionRows(rows []CompositionRow) []CompositionRow {
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.Repo != b.Repo {
+			return a.Repo < b.Repo
+		}
+		if a.Language != b.Language {
+			return a.Language < b.Language
+		}
+		if a.Size != b.Size {
+			return a.Size < b.Size
+		}
+		if a.Severity != b.Severity {
+			return a.Severity < b.Severity
+		}
+		if a.FindingType != b.FindingType {
+			return a.FindingType < b.FindingType
+		}
+		return a.Cases < b.Cases
+	})
+	return rows
+}
+
+// SelfScoreRecordedReviews scores each case's recorded source-review findings
+// against that case's own gold, exactly as a replayed candidate would be
+// scored. Everything it reads was captured when the case was frozen, so the
+// result is available instantly without invoking an agent, touching a gate, or
+// re-running anything. It answers "what would eval report for the reviews that
+// produced this set" - the baseline a candidate has to beat.
+func SelfScoreRecordedReviews(cases []Case) EvaluationSummary {
+	evaluations := make([]Evaluation, 0, len(cases))
+	for _, c := range cases {
+		evaluation := Evaluation{
+			CaseID:            c.ID,
+			Candidate:         "recorded-review",
+			Status:            "completed",
+			HasFindingGold:    c.Labels.HasGold(),
+			GoldCount:         c.Labels.TrueIssueCount(),
+			FalsePositiveGold: c.Labels.FalsePositiveCount(),
+		}
+		findings, err := osReadRoundFindings(c)
+		if err != nil {
+			evaluation.Status = "failed"
+		} else {
+			score := ScoreCandidate(c.Labels, findings)
+			evaluation.TruePositive = score.TruePositive
+			evaluation.TruePositiveExact = score.TruePositiveExact
+			evaluation.TruePositiveFuzzy = score.TruePositiveFuzzy
+			evaluation.FalseNegative = score.FalseNegative
+			evaluation.FalsePositive = score.FalsePositive
+			evaluation.FalsePositiveGold = score.FalsePositiveGold
+			evaluation.Pending = score.Pending
+		}
+		evaluations = append(evaluations, evaluation)
+	}
+	return SummarizeEvaluations(evaluations)
 }
 
 func shortFingerprint(value string) string {
@@ -272,36 +399,6 @@ func shortFingerprint(value string) string {
 		return value
 	}
 	return value[:12]
-}
-
-// RenderSets is a stable human-readable preflight. It intentionally contains
-// counts and buckets only, never source paths, URLs, diffs, or findings.
-func RenderSets(summaries []SetSummary) string {
-	var b strings.Builder
-	b.WriteString("LOCAL-ONLY EVAL CASE SETS\n")
-	for _, summary := range summaries {
-		fmt.Fprintf(&b, "\n%s: %d cases, %d with finding-level gold (true-positive %d, false-negative %d, false-positive %d), %d unlabeled / pending, %d candidate findings queued\n",
-			summary.Name, summary.Cases, summary.GoldCases, summary.TruePositive, summary.FalseNegative, summary.FalsePositive, summary.Unlabeled, summary.QueuedFindings)
-		if summary.Name == "diversified" {
-			if summary.Cap == 0 {
-				fmt.Fprintf(&b, "  cap: none (one gold case per stratum), pins: %d\n", summary.PinCount)
-			} else {
-				fmt.Fprintf(&b, "  cap: %d, pins: %d\n", summary.Cap, summary.PinCount)
-			}
-		}
-		if summary.Warning != "" {
-			fmt.Fprintf(&b, "  warning: %s\n", summary.Warning)
-		}
-		keys := make([]string, 0, len(summary.Composition))
-		for key := range summary.Composition {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			fmt.Fprintf(&b, "  %d  %s\n", summary.Composition[key], key)
-		}
-	}
-	return b.String()
 }
 
 // RenderReport is a stable human-readable local comparison. Scores are
@@ -346,7 +443,26 @@ func RenderReport(reports []CandidateReport) string {
 		if report.AverageTokens == nil {
 			b.WriteString("  token cost: unknown (token usage was not reported for every replay)\n")
 		} else {
-			fmt.Fprintf(&b, "  token cost: %.0f fresh-input + output tokens per reported replay\n", *report.AverageTokens)
+			cacheRead, cacheWrite := 0.0, 0.0
+			if report.AverageCacheReadTokens != nil {
+				cacheRead = *report.AverageCacheReadTokens
+			}
+			if report.AverageCacheWriteTokens != nil {
+				cacheWrite = *report.AverageCacheWriteTokens
+			}
+			line := fmt.Sprintf("  token cost: %.0f fresh-input + output", *report.AverageTokens-cacheRead-cacheWrite)
+			if cacheRead > 0 {
+				line += fmt.Sprintf(" + %.0f cache-read", cacheRead)
+			}
+			if cacheWrite > 0 {
+				line += fmt.Sprintf(" + %.0f cache-write", cacheWrite)
+			}
+			if cacheRead > 0 || cacheWrite > 0 {
+				line += fmt.Sprintf(" = %.0f tokens per reported replay\n", *report.AverageTokens)
+			} else {
+				line += " tokens per reported replay\n"
+			}
+			b.WriteString(line)
 		}
 		fmt.Fprintf(&b, "  wall time: %.1fs average\n", report.AverageWallMS/1000)
 		if report.AverageTokens != nil {

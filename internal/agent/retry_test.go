@@ -65,6 +65,31 @@ func TestClassifyTransient_Positive(t *testing.T) {
 			errMsg:  `Post "https://api.anthropic.com": net/http: TLS handshake timeout`,
 			wantSub: "tls",
 		},
+		{
+			name:    "prose turn ending",
+			errMsg:  `antigravity output parse: ended its turn with prose instead of the required JSON object`,
+			wantSub: "prose",
+		},
+		{
+			name:    "agy permission declaration",
+			errMsg:  `antigravity reported error: declaring permissions: cortex tool view_file: failed`,
+			wantSub: "permission",
+		},
+		{
+			name:    "invalid tool call",
+			errMsg:  `antigravity reported error: invalid tool call error (invalid_args)`,
+			wantSub: "tool call",
+		},
+		{
+			name:    "provider protocol residue after JSON",
+			errMsg:  `pi output parse: invalid character '<' after top-level value (output snippet: "{\"summary\":\"x\"}")`,
+			wantSub: "protocol residue",
+		},
+		{
+			name:    "unfused split bare JSON objects",
+			errMsg:  `pi output parse: split bare JSON objects could not be fused into one valid object`,
+			wantSub: "split",
+		},
 	}
 
 	for _, tc := range cases {
@@ -105,12 +130,49 @@ func TestClassifyTransient_Negative(t *testing.T) {
 			name:   "schema validation",
 			errMsg: `JSON output missing required field "summary"`,
 		},
+		{
+			name:   "competing verdicts",
+			errMsg: `pi output parse: multiple bare JSON objects found in output`,
+		},
+		{
+			name:   "free usage limit",
+			errMsg: `API rate limit reached with HTTP 429: FreeUsageLimit exceeded`,
+		},
+		{
+			name:   "quota exhausted",
+			errMsg: `provider error: quota_exhausted`,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if label, ok := classifyTransient(errors.New(tc.errMsg)); ok {
 				t.Errorf("expected non-transient for %q, got %q", tc.errMsg, label)
+			}
+		})
+	}
+}
+
+func TestRunWithRetry_DoesNotRetryQuotaExhaustion(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	for _, message := range []string{
+		"API rate limit reached with HTTP 429: FreeUsageLimit exceeded",
+		"API request failed with HTTP 429: insufficient_quota",
+		"API request failed with HTTP 429: You exceeded your current quota",
+	} {
+		t.Run(message, func(t *testing.T) {
+			calls := 0
+			quotaErr := errors.New(message)
+			_, err := runWithRetry(context.Background(), "antigravity", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+				calls++
+				return nil, quotaErr
+			})
+			if !errors.Is(err, quotaErr) {
+				t.Fatalf("expected quota error to propagate, got %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("expected one call for quota exhaustion, got %d", calls)
 			}
 		})
 	}
@@ -350,6 +412,52 @@ func TestRunWithRetry_CombinedClassifierForClaude(t *testing.T) {
 	}
 	if !errors.Is(err, errNoStructuredOutput) {
 		t.Errorf("expected errNoStructuredOutput to surface as final error, got %v", err)
+	}
+}
+
+func TestClaudeRetryClassifier_ReportedAPIErrorDecidesAlone(t *testing.T) {
+	exit := errors.New("exit status 1")
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantLabel string
+		wantRetry bool
+	}{
+		{
+			name:      "transient status",
+			err:       claudeExitError(exit, "", &claudeAPIError{Status: 503, Message: "API Error: 503"}),
+			wantLabel: "http 503",
+			wantRetry: true,
+		},
+		{
+			name: "exhausted quota behind a transient status",
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: "API Error: 429 You exceeded your current quota"}),
+		},
+		{
+			name: "exhausted quota behind the displayed message cut",
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: strings.Repeat("x", claudeAPIErrorMessageMaxRunes+50) + " quota exceeded"}),
+		},
+		{
+			name: "permanent status beside transient-looking stderr",
+			err:  claudeExitError(exit, "upstream proxy returned 503", &claudeAPIError{Status: 400, Message: "API Error: 400"}),
+		},
+		{
+			name: "cancelled invocation",
+			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Status: 529, Message: "API Error: 529"}),
+		},
+		{
+			name:      "stderr alone",
+			err:       claudeExitError(exit, "HTTP 529 from api.anthropic.com", nil),
+			wantLabel: "http 529",
+			wantRetry: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			label, retry := claudeRetryClassifier(tc.err)
+			if retry != tc.wantRetry || label != tc.wantLabel {
+				t.Errorf("claudeRetryClassifier(%q) = (%q, %v), want (%q, %v)", tc.err, label, retry, tc.wantLabel, tc.wantRetry)
+			}
+		})
 	}
 }
 

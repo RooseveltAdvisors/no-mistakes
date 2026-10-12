@@ -38,6 +38,7 @@ func TestBuildPipelineSummary_ReviewWithRisk(t *testing.T) {
 }
 
 func TestBuildPipelineSummary_EscapesFindingDescriptionsInDetails(t *testing.T) {
+	t.Parallel()
 	findings := `{"findings":[{"id":"review-1","severity":"warning","file":"cmd/main.go","line":10,"description":"break </details><summary>oops</summary> after"}],"summary":"1 warning","risk_level":"low","risk_rationale":"safe"}`
 	steps := []*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &findings}}
 	rounds := map[string][]*db.StepRound{
@@ -72,8 +73,11 @@ func TestBuildPipelineSummary_ReviewUsesFinalCleanState(t *testing.T) {
 	if !strings.Contains(md, "🔧 **Review**") {
 		t.Errorf("expected fixed review status, got:\n%s", md)
 	}
-	if !strings.Contains(md, "auto-fixed") {
-		t.Errorf("expected auto-fixed in review line, got:\n%s", md)
+	if !strings.Contains(md, "🔧 **Review** - 1 issue found → fix attempted; result not reported ✅") {
+		t.Errorf("expected unreported fix result in review line, got:\n%s", md)
+	}
+	if strings.Contains(md, "auto-fixed") {
+		t.Errorf("did not expect unreported fix result to be called auto-fixed, got:\n%s", md)
 	}
 	if strings.Contains(md, "user-fixed") {
 		t.Errorf("did not expect user-fixed in review line, got:\n%s", md)
@@ -90,7 +94,7 @@ func TestBuildPipelineSummary_ReviewUsesFinalCleanState(t *testing.T) {
 	if !strings.Contains(risk, "✅") {
 		t.Errorf("expected checkmark for low risk, got: %q", risk)
 	}
-	if !strings.Contains(md, "🔧 Fix applied.") || !strings.Contains(md, "✅ Re-checked - no issues remain.") {
+	if !strings.Contains(md, "🔧 Fix attempted; result not reported.") || !strings.Contains(md, "✅ Re-checked - no issues remain.") {
 		t.Errorf("expected the fix and verification to remain visible for multi-round review, got:\n%s", md)
 	}
 }

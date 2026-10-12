@@ -1,15 +1,19 @@
 package evidence
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 )
 
@@ -49,6 +53,12 @@ type Request struct {
 	Segments []string
 	// SourceDir is the local directory holding the run's evidence files.
 	SourceDir string
+	// ExcludeDirs names directories directly under SourceDir that must never
+	// be published, as slash-separated paths relative to it. The run's evidence
+	// directory is shared with content that is deliberately NOT publishable -
+	// the review conversation lives there - and this package must not have to
+	// know which name that is, so the caller supplies it.
+	ExcludeDirs []string
 	// Message is the evidence commit message.
 	Message string
 	// ForbiddenBranches names branches that must never receive evidence (the
@@ -98,7 +108,7 @@ func Publish(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	dir := normalizeInBranchDir(req.Dir, req.Segments)
-	files, err := collectFiles(req.SourceDir)
+	files, err := collectFiles(req.SourceDir, req.ExcludeDirs)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +163,7 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 	published := make([]string, 0, len(files))
 	for _, file := range files {
 		inBranch := path.Join(dir, file.Rel)
-		blob, err := git.RunWithEnv(ctx, req.RepoDir, env, "hash-object", "-w", "--", file.Abs)
+		blob, err := hashEvidenceFile(ctx, req.RepoDir, env, file.Abs)
 		if err != nil {
 			return nil, fmt.Errorf("hash evidence file %s: %w", file.Rel, err)
 		}
@@ -186,6 +196,24 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 		return nil, fmt.Errorf("push evidence branch %s to %s: %w", branch, safeurl.Redact(req.PushURL), err)
 	}
 	return &Result{Branch: branch, CommitSHA: commit, Dir: dir, Files: published}, nil
+}
+
+// hashEvidenceFile writes one evidence file into the object store and returns
+// its blob id. A readable UTF-8 text file first gets the same home-directory
+// redaction the PR title and body get, because captured command output carries
+// absolute paths under the operator's home. Binary and visual artifacts, and
+// the local file itself, are left untouched.
+func hashEvidenceFile(ctx context.Context, repoDir string, env []string, abs string) (string, error) {
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return "", err
+	}
+	if utf8.Valid(content) && !bytes.Contains(content, []byte{0}) {
+		if redacted := safepath.RedactText(string(content)); redacted != string(content) {
+			return git.RunWithInput(ctx, repoDir, redacted, "hash-object", "-w", "--stdin")
+		}
+	}
+	return git.RunWithEnv(ctx, repoDir, env, "hash-object", "-w", "--", abs)
 }
 
 // remoteTip returns the remote evidence branch head, fetched into the local
@@ -294,12 +322,25 @@ type collectedFile struct {
 	Mode string
 }
 
-// collectFiles lists the regular files under root in a deterministic order.
+// collectFiles lists the regular files under root in a deterministic order,
+// skipping any directory named in exclude (slash-separated, relative to root).
 // Symlinks are skipped: an evidence symlink would publish a pointer to a path
 // that only exists on the daemon host.
-func collectFiles(root string) ([]collectedFile, error) {
+//
+// This is the single boundary every publication routes through, which is why
+// the exclusion belongs here rather than at a caller: an excluded directory is
+// skipped WHOLE, so its contents are never published and never counted against
+// the size and file-count budgets either - otherwise unpublishable content
+// could still fail the publication and drop real evidence back to local links.
+func collectFiles(root string, exclude []string) ([]collectedFile, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, nil
+	}
+	excluded := make(map[string]bool, len(exclude))
+	for _, name := range exclude {
+		if name = strings.Trim(strings.TrimSpace(name), "/"); name != "" {
+			excluded[name] = true
+		}
 	}
 	var files []collectedFile
 	var total int64
@@ -310,7 +351,13 @@ func collectFiles(root string) ([]collectedFile, error) {
 			}
 			return err
 		}
-		if d.IsDir() || !d.Type().IsRegular() {
+		if d.IsDir() {
+			if rel, relErr := filepath.Rel(root, p); relErr == nil && excluded[filepath.ToSlash(rel)] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		info, err := d.Info()

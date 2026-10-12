@@ -10,22 +10,11 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const testPipelineHeadSHA = "0123456789abcdef0123456789abcdef01234567"
-
-func TestNoMistakesRequiredWorkflowChecksPipelineSignature(t *testing.T) {
-	t.Parallel()
-
-	workflow, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "no-mistakes-required.yml"))
-	if err != nil {
-		t.Fatalf("read required workflow: %v", err)
-	}
-	if !strings.Contains(string(workflow), "marker='"+noMistakesPRSignature+"'") {
-		t.Fatalf("required workflow does not check the generated PR signature %q", noMistakesPRSignature)
-	}
-}
 
 func TestBuildPipelineSummary_AllClean(t *testing.T) {
 	t.Parallel()
@@ -62,6 +51,112 @@ func TestBuildPipelineSummary_AllClean(t *testing.T) {
 	}
 	if risk != "" {
 		t.Errorf("expected empty risk for clean run, got: %q", risk)
+	}
+}
+
+func TestBuildPipelineSummary_BitbucketCloudOmitsHTMLAndAttestation(t *testing.T) {
+	t.Parallel()
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted},
+		{ID: "s2", StepName: types.StepTest, Status: types.StepStatusCompleted},
+		{ID: "s3", StepName: types.StepLint, Status: types.StepStatusCompleted},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", DurationMS: 500}},
+		"s2": {{Round: 1, Trigger: "initial", DurationMS: 300}},
+		"s3": {{Round: 1, Trigger: "initial", DurationMS: 200}},
+	}
+
+	md, risk := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, scm.ProviderBitbucket)
+
+	if !strings.Contains(md, "## Pipeline") {
+		t.Fatal("missing Pipeline heading")
+	}
+	if !strings.Contains(md, noMistakesPRSignature) {
+		t.Fatalf("expected human signature, got:\n%s", md)
+	}
+	for _, want := range []string{
+		"✅ **Review** - passed",
+		"✅ **Test** - passed",
+		"✅ **Lint** - passed",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected %q in Bitbucket pipeline summary, got:\n%s", want, md)
+		}
+	}
+	for _, leak := range []string{
+		"<details>", "</details>", "<summary>", "</summary>",
+		"<!--", "-->", "<code>", "<video", "No issues found.",
+		pipelineAttestationCommentPrefix,
+	} {
+		if strings.Contains(md, leak) {
+			t.Errorf("Bitbucket pipeline leaked %q:\n%s", leak, md)
+		}
+	}
+	if risk != "" {
+		t.Errorf("expected empty risk for clean run, got: %q", risk)
+	}
+}
+
+func TestBuildPipelineSummary_FindingCannotSpoofFoldBoundary(t *testing.T) {
+	t.Parallel()
+	for _, field := range []struct {
+		name        string
+		file        string
+		description string
+		spoof       string
+	}{
+		{"description", "foo.py", "Update the header:\n### Configuration\nadd the missing key", "\n### Configuration"},
+		{"file", "src/app.py\n### Fake Heading", "add the missing key", "\n### Fake Heading"},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			t.Parallel()
+			findings := types.Findings{
+				Items: []types.Finding{{
+					ID:          "lint-1",
+					Severity:    "warning",
+					File:        field.file,
+					Line:        12,
+					Description: field.description,
+					Action:      types.ActionAutoFix,
+				}},
+			}
+			raw, err := types.MarshalFindingsJSON(findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			steps := []*db.StepResult{
+				{ID: "s1", StepName: types.StepLint, Status: types.StepStatusCompleted, FindingsJSON: &raw},
+			}
+			rounds := map[string][]*db.StepRound{
+				"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &raw, DurationMS: 200}},
+			}
+
+			for _, tc := range []struct {
+				name     string
+				provider scm.Provider
+			}{
+				{"github", scm.ProviderGitHub},
+				{"bitbucket", scm.ProviderBitbucket},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
+					md, _ := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, tc.provider)
+					if strings.Contains(md, field.spoof) {
+						t.Fatalf("embedded finding %s was not escaped, spoofs the PR-body fold-boundary marker:\n%s", field.name, md)
+					}
+					if !strings.Contains(md, "add the missing key") {
+						t.Fatalf("expected the finding bullet to stay intact:\n%s", md)
+					}
+
+					_, updates := splitPipelineSectionHeader(md)
+					groups := parsePipelineUpdateGroups(updates)
+					if len(groups) != 1 {
+						t.Fatalf("expected exactly 1 step group, got %d - embedded finding %s was mistaken for a fold boundary:\n%s", len(groups), field.name, md)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -139,6 +234,7 @@ func TestBuildPipelineSummary_EmitsStructuredStepAttestation(t *testing.T) {
 }
 
 func TestBuildPipelineSummary_IncludesAllPipelineSteps(t *testing.T) {
+	t.Parallel()
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepRebase, Status: types.StepStatusCompleted},
 		{ID: "s2", StepName: types.StepReview, Status: types.StepStatusCompleted},
@@ -261,6 +357,7 @@ func TestBuildPipelineSummary_RebaseWithConflicts(t *testing.T) {
 }
 
 func TestBuildTestingSummary_DoesNotClaimPassedWithoutRounds(t *testing.T) {
+	t.Parallel()
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted},
 	}
@@ -512,6 +609,59 @@ func TestBuildTestingSummary_RejectsUnsafeArtifactTargets(t *testing.T) {
 	}
 }
 
+func TestBuildTestingSummary_ArtifactContentCannotSpoofFoldBoundary(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Server log","content":"line one\n### Fake Heading\nline two"}]}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummary(steps, rounds)
+	t.Logf("rendered testing markdown:\n%s", md)
+
+	if strings.Contains(md, "\n### Fake Heading") {
+		t.Fatalf("embedded artifact content was not escaped, spoofs the PR-body fold-boundary marker:\n%s", md)
+	}
+	if !strings.Contains(md, "line one") || !strings.Contains(md, "line two") {
+		t.Fatalf("expected the artifact content to stay intact:\n%s", md)
+	}
+}
+
+func TestBuildTestingSummaryForPR_ArtifactContentCannotSpoofFoldBoundary(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Server log","content":"line one\n### Fake Heading\nline two"}]}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	for _, tc := range []struct {
+		name     string
+		provider scm.Provider
+	}{
+		{"github", scm.ProviderGitHub},
+		{"bitbucket", scm.ProviderBitbucket},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			md := BuildTestingSummaryForPRWithProvider(steps, rounds, "https://github.com/example/widgets.git", "abc123", t.TempDir(), "", nil, tc.provider)
+			t.Logf("rendered PR testing markdown:\n%s", md)
+
+			if strings.Contains(md, "\n### Fake Heading") {
+				t.Fatalf("embedded artifact content was not escaped, spoofs the PR-body fold-boundary marker:\n%s", md)
+			}
+			if !strings.Contains(md, "line one") || !strings.Contains(md, "line two") {
+				t.Fatalf("expected the artifact content to stay intact:\n%s", md)
+			}
+		})
+	}
+}
+
 func TestBuildTestingSummaryForPR_RendersEvidenceArtifactsCompactly(t *testing.T) {
 	t.Parallel()
 	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"screenshot","label":"Checkout screenshot","path":"artifacts/checkout.png"},{"kind":"log","label":"Server log","path":"artifacts/server.log"},{"kind":"log","label":"Placement rectangle evidence","content":"{\"button\":{\"top\":169,\"left\":248,\"right\":272,\"bottom\":193}}"}]}`
@@ -538,6 +688,85 @@ func TestBuildTestingSummaryForPR_RendersEvidenceArtifactsCompactly(t *testing.T
 		if strings.Contains(md, broken) {
 			t.Fatalf("did not expect broken or noisy artifact rendering %q, got:\n%s", broken, md)
 		}
+	}
+}
+
+func TestBuildTestingSummaryForPR_SeparatesMixedEvidenceBlocks(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Inline first","content":"first output"},{"kind":"log","label":"Linked first","url":"https://example.com/first.log"},{"kind":"log","label":"Inline second","content":"second output"},{"kind":"log","label":"Linked second","url":"https://example.com/second.log"},{"kind":"log","label":"Linked third","url":"https://example.com/third.log"}]}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
+
+	for _, want := range []string{
+		"</details>\n\n- Evidence: [Linked first]",
+		"- Evidence: [Linked first](https://example.com/first.log)\n\n<details>",
+		"</details>\n\n- Evidence: [Linked second]",
+		"- Evidence: [Linked second](https://example.com/second.log)\n- Evidence: [Linked third]",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected mixed evidence boundary %q, got:\n%s", want, md)
+		}
+	}
+}
+
+func TestBuildTestingSummaryForPR_BitbucketCloudOmitsHTMLAndKeepsEvidence(t *testing.T) {
+	t.Parallel()
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
+	localPath := writeTempEvidenceFile(t, evidenceRoot, "server.log", []byte("POST /checkout 200"))
+	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"Placement rectangle evidence","content":"{\"button\":{\"top\":169}}"},{"kind":"video","label":"Checkout recording","url":"https://example.com/checkout.mp4"},{"kind":"log","label":"Server log","path":%q}]}`, localPath)
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummaryForPRWithProvider(steps, rounds, "https://bitbucket.org/example/widgets.git", "abc123", t.TempDir(), evidenceRoot, nil, scm.ProviderBitbucket)
+
+	for _, want := range []string{
+		"## Testing",
+		"Evidence was collected.",
+		"### Evidence: Placement rectangle evidence",
+		"```text\n{\"button\":{\"top\":169}}\n```",
+		"[Checkout recording](https://example.com/checkout.mp4)",
+		"### Evidence: Server log",
+		"```text\nPOST /checkout 200\n```",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected %q in Bitbucket testing summary, got:\n%s", want, md)
+		}
+	}
+	for _, leak := range []string{"<details>", "<summary>", "<code>", "<video", "![Checkout recording]"} {
+		if strings.Contains(md, leak) {
+			t.Errorf("Bitbucket testing leaked %q:\n%s", leak, md)
+		}
+	}
+}
+
+func TestBuildTestingSummaryForPR_BitbucketKeepsHTMLMentioningSummaryAsProse(t *testing.T) {
+	t.Parallel()
+	summary := "Bitbucket render is clean of <details>, <summary>, <code>, <video>, and the attestation HTML comment."
+	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":%q}`, summary)
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummaryForPRWithProvider(steps, rounds, "https://bitbucket.org/example/widgets.git", "abc123", t.TempDir(), "", nil, scm.ProviderBitbucket)
+
+	if !strings.Contains(md, "## Testing\n\n"+summary) {
+		t.Fatalf("expected Bitbucket testing summary to stay prose, got:\n%s", md)
+	}
+	if strings.Contains(md, "```") || strings.Contains(md, "`"+summary+"`") {
+		t.Fatalf("Bitbucket testing summary must not be wrapped as code just because it mentions HTML tags, got:\n%s", md)
 	}
 }
 
@@ -665,6 +894,7 @@ func writeTempEvidenceFile(t *testing.T, evidenceRoot, name string, content []by
 }
 
 func TestBuildTestingSummaryForPR_EmbedsLocalTextEvidenceContent(t *testing.T) {
+	t.Parallel()
 	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	fileBody := "RENDERED WIZARD SCREEN\n  > Claude\n  > Codex\nGitHub source selected"
 	localPath := writeTempEvidenceFile(t, evidenceRoot, "init-wizard-rendered-screens.txt", []byte(fileBody))
@@ -696,6 +926,7 @@ func TestBuildTestingSummaryForPR_EmbedsLocalTextEvidenceContent(t *testing.T) {
 }
 
 func TestBuildTestingSummaryForPR_PreservesPublicURLForEmbeddedTextEvidence(t *testing.T) {
+	t.Parallel()
 	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	fileBody := "rendered wizard evidence"
 	localPath := writeTempEvidenceFile(t, evidenceRoot, "wizard.txt", []byte(fileBody))
@@ -772,6 +1003,7 @@ func TestBuildTestingSummaryForPR_DoesNotEmbedRepoRelativeSecrets(t *testing.T) 
 }
 
 func TestBuildTestingSummaryForPR_RendersFileCaptionAsText(t *testing.T) {
+	t.Parallel()
 	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	fileBody := "safe evidence body"
 	localPath := writeTempEvidenceFile(t, evidenceRoot, "caption.txt", []byte(fileBody))
@@ -798,6 +1030,7 @@ func TestBuildTestingSummaryForPR_RendersFileCaptionAsText(t *testing.T) {
 }
 
 func TestBuildTestingSummaryForPR_TruncatesLargeTextEvidenceFromMiddle(t *testing.T) {
+	t.Parallel()
 	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	head := strings.Repeat("HEAD-LINE\n", 50)
 	tail := strings.Repeat("TAIL-LINE\n", 50)
@@ -828,6 +1061,7 @@ func TestBuildTestingSummaryForPR_TruncatesLargeTextEvidenceFromMiddle(t *testin
 }
 
 func TestBuildTestingSummaryForPR_LimitsTotalEmbeddedTextEvidence(t *testing.T) {
+	t.Parallel()
 	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	firstBody := strings.Repeat("first evidence line\n", 700)
 	secondBody := strings.Repeat("second evidence line\n", 700)
@@ -857,6 +1091,7 @@ func TestBuildTestingSummaryForPR_LimitsTotalEmbeddedTextEvidence(t *testing.T) 
 }
 
 func TestBuildTestingSummaryForPR_FallsBackForBinaryEvidence(t *testing.T) {
+	t.Parallel()
 	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	localPath := writeTempEvidenceFile(t, evidenceRoot, "capture.dat", []byte{0x00, 0x01, 0x02, 0xff, 0x00})
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Binary capture","path":%q}]}`, localPath)
@@ -874,5 +1109,134 @@ func TestBuildTestingSummaryForPR_FallsBackForBinaryEvidence(t *testing.T) {
 	}
 	if strings.Contains(md, "```text") {
 		t.Fatalf("did not expect binary content to be embedded as text, got:\n%s", md)
+	}
+}
+
+func TestBuildPRTestingSummary_PutsEachAttachmentInItsOwnParagraph(t *testing.T) {
+	t.Parallel()
+	const (
+		image   = `{"kind":"screenshot","label":"Shot","path":"shot.png"}`
+		image2  = `{"kind":"screenshot","label":"Shot two","path":"shot2.png"}`
+		video   = `{"kind":"video","label":"Rec","path":"rec.mp4"}`
+		details = `{"kind":"log","label":"Inline","content":"output"}`
+	)
+	tests := []struct {
+		name        string
+		artifacts   []string
+		attachments int
+		upstreamURL string
+		status      types.StepStatus
+	}{
+		{name: "image before outcome", artifacts: []string{image}, attachments: 1, status: types.StepStatusFailed},
+		{name: "video before outcome", artifacts: []string{video}, attachments: 1, status: types.StepStatusFailed},
+		{name: "image then video", artifacts: []string{image, video}, attachments: 2},
+		{name: "video then image", artifacts: []string{video, image}, attachments: 2},
+		{name: "image video image", artifacts: []string{image, video, image2}, attachments: 3},
+		{name: "image and video next to details", artifacts: []string{details, image, video, details}, attachments: 2},
+		{name: "evidence link then video", artifacts: []string{image, video}, attachments: 2, upstreamURL: "git@github.com:example/widgets.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[` + strings.Join(tt.artifacts, ",") + `]}`
+			status := tt.status
+			if status == "" {
+				status = types.StepStatusCompleted
+			}
+			steps := []*db.StepResult{
+				{ID: "s1", StepName: types.StepTest, Status: status, FindingsJSON: &findings},
+			}
+			rounds := map[string][]*db.StepRound{
+				"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+			}
+			attachments := map[string]string{
+				"shot.png":  "https://github.com/user-attachments/assets/shot",
+				"shot2.png": "https://github.com/user-attachments/assets/shot2",
+				"rec.mp4":   "https://github.com/user-attachments/assets/rec",
+			}
+
+			md := buildPRTestingSummary(steps, rounds, tt.upstreamURL, "abc123", t.TempDir(), "", nil, scm.ProviderUnknown, attachments)
+
+			lines := strings.Split(md, "\n")
+			found := 0
+			for i, line := range lines {
+				if !strings.Contains(line, "https://github.com/user-attachments/assets/") {
+					continue
+				}
+				found++
+				if i == 0 || lines[i-1] != "" {
+					t.Errorf("attachment line %q is not preceded by a blank line, got:\n%s", line, md)
+				}
+				// A list item interrupts a paragraph, so the attachment's own
+				// evidence link may follow it directly.
+				if i+1 < len(lines) && lines[i+1] != "" && !strings.HasPrefix(lines[i+1], "- Evidence: [") {
+					t.Errorf("attachment line %q is not followed by a blank line, got:\n%s", line, md)
+				}
+			}
+			if found != tt.attachments {
+				t.Errorf("expected %d attachment lines, found %d, got:\n%s", tt.attachments, found, md)
+			}
+			if tt.status == types.StepStatusFailed && !strings.Contains(md, "\n\n- Outcome:") {
+				t.Errorf("expected a blank line before the outcome, got:\n%s", md)
+			}
+		})
+	}
+}
+
+func TestBuildPRTestingSummary_SeparatesDetailsFromAdjacentAttachments(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		artifacts string
+		status    types.StepStatus
+		want      string
+	}{
+		{
+			name:      "outcome after details",
+			artifacts: `{"kind":"log","label":"Inline","content":"output"}`,
+			status:    types.StepStatusFailed,
+			want:      "</details>\n\n- Outcome:",
+		},
+		{
+			name:      "image after details",
+			artifacts: `{"kind":"log","label":"Inline","content":"output"},{"kind":"screenshot","label":"Shot","path":"shot.png"}`,
+			want:      "</details>\n\n![Shot](https://github.com/user-attachments/assets/shot)",
+		},
+		{
+			name:      "video after details",
+			artifacts: `{"kind":"log","label":"Inline","content":"output"},{"kind":"video","label":"Rec","path":"rec.mp4"}`,
+			want:      "</details>\n\nhttps://github.com/user-attachments/assets/rec",
+		},
+		{
+			name:      "image before details",
+			artifacts: `{"kind":"screenshot","label":"Shot","path":"shot.png"},{"kind":"log","label":"Inline","content":"output"}`,
+			want:      "![Shot](https://github.com/user-attachments/assets/shot)\n- Evidence: [Shot](https://github.com/example/widgets/blob/abc123/shot.png)\n\n<details>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[` + tt.artifacts + `]}`
+			status := tt.status
+			if status == "" {
+				status = types.StepStatusCompleted
+			}
+			steps := []*db.StepResult{
+				{ID: "s1", StepName: types.StepTest, Status: status, FindingsJSON: &findings},
+			}
+			rounds := map[string][]*db.StepRound{
+				"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+			}
+			attachments := map[string]string{
+				"shot.png": "https://github.com/user-attachments/assets/shot",
+				"rec.mp4":  "https://github.com/user-attachments/assets/rec",
+			}
+
+			md := buildPRTestingSummary(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil, scm.ProviderUnknown, attachments)
+
+			if !strings.Contains(md, tt.want) {
+				t.Errorf("expected %q, got:\n%s", tt.want, md)
+			}
+		})
 	}
 }

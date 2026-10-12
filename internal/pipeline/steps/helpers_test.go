@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -19,8 +18,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+var testGitExecutable, testGitErr = testgit.RealGit()
 
 type mockAgent struct {
 	name  string
@@ -135,9 +138,55 @@ func setupGitRepo(t *testing.T) (string, string, string) {
 	return dir, gitRepoTemplate.baseSHA, gitRepoTemplate.headSHA
 }
 
+// ensureHermeticOrigin gives a test repo that lacks an "origin" remote a
+// local one (itself) so incidental upstream fetches stay hermetic instead of
+// reaching the network. Without this, tests that never configure a real
+// remote fetch the placeholder github.com/test/repo URL - which used to be
+// harmless because a failed fetch degraded silently, but resolveBranchBaseSHA
+// now refuses on fetch failure (#997/#1147), so every step test needs a
+// fetchable base branch ref.
+func ensureHermeticOrigin(t *testing.T, workDir string) {
+	t.Helper()
+	if testGitExecutable == "" {
+		return
+	}
+	gitDir, err := os.Stat(filepath.Join(workDir, ".git"))
+	if err != nil || !gitDir.IsDir() {
+		return
+	}
+	if cmd := exec.Command(testGitExecutable, "-C", workDir, "remote", "get-url", "origin"); cmd.Run() != nil {
+		cmd = exec.Command(testGitExecutable, "-C", workDir, "remote", "add", "origin", workDir)
+		if output, addErr := cmd.CombinedOutput(); addErr != nil {
+			t.Fatalf("add hermetic test origin: %v: %s", addErr, output)
+		}
+	}
+}
+
+// ensureLocalBranch creates branch pointing at ref in workDir, unless it
+// already exists. Tests that configure a base branch other than "main" (e.g.
+// "develop", "epic/feature") need that ref to actually exist locally: with
+// ensureHermeticOrigin pointing "origin" at the worktree itself,
+// resolveBranchBaseSHA's base-branch fetch now fails closed on a missing ref
+// (#997/#1147) instead of silently degrading.
+func ensureLocalBranch(t *testing.T, workDir, branch, ref string) {
+	t.Helper()
+	check := exec.Command(testGitExecutable, "-C", workDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if check.Run() == nil {
+		return
+	}
+	cmd := exec.Command(testGitExecutable, "-C", workDir, "branch", branch, ref)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create local branch %s: %v: %s", branch, err, output)
+	}
+}
+
 // newTestContext creates a StepContext for testing with optional config overrides.
 func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA string, cmds config.Commands) *pipeline.StepContext {
 	t.Helper()
+	if testGitErr != nil {
+		t.Fatal(testGitErr)
+	}
+	ensureHermeticOrigin(t, workDir)
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	database, err := db.Open(dbPath)
@@ -158,7 +207,7 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 		Agent:       ag,
 		Config:      &config.Config{Agent: types.AgentClaude, Commands: cmds},
 		DB:          database,
-		Log:         func(s string) {},
+		Log:         func(s string) { t.Log(s) },
 		LogChunk:    func(s string) {},
 		LogFile:     func(s string) {},
 	}
@@ -167,8 +216,13 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 // fakeCLIEnv builds environment variable entries for a fake CLI binary and PATH override.
 // Returns env entries that should be set on StepContext.Env for parallel-safe tests.
 func fakeCLIEnv(binDir string, vars map[string]string) []string {
+	if testGitErr != nil {
+		panic(testGitErr)
+	}
 	env := []string{
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"FAKE_CLI_REAL_GIT=" + testGitExecutable,
+		"FAKE_CLI_HEAD_FROM_WORKTREE=1",
 	}
 	for k, v := range vars {
 		env = append(env, k+"="+v)
@@ -196,28 +250,10 @@ func fakeCLIBinDir(t *testing.T) string {
 	return dir
 }
 
-// linkTestBinary creates a hard link (or copy) of the current test binary
-// with the given name in binDir. On Windows, .exe is appended.
+// linkTestBinary places the tiny fake-CLI helper on PATH under name.
 func linkTestBinary(t *testing.T, binDir, name string) {
 	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	dst := filepath.Join(binDir, name)
-	if err := os.Link(exe, dst); err != nil {
-		// Fallback to copy if hard link fails (cross-device, etc.)
-		data, readErr := os.ReadFile(exe)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		if err := os.WriteFile(dst, data, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	stepstest.LinkFakeCLI(t, binDir, name)
 }
 
 // fakeGH creates a mock gh binary in a temp dir and returns env entries for StepContext.Env.
@@ -225,12 +261,41 @@ func linkTestBinary(t *testing.T, binDir, name string) {
 func fakeGH(t *testing.T, prViewURL string) (env []string, logFile string) {
 	t.Helper()
 	binDir := fakeCLIBinDir(t)
-	logFile = filepath.Join(t.TempDir(), "gh.log")
+	tmp := t.TempDir()
+	logFile = filepath.Join(tmp, "gh.log")
+	bodyFile := filepath.Join(tmp, "pr-body.md")
+	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	linkTestBinary(t, binDir, "gh")
 	env = fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":   "gh",
-		"FAKE_CLI_LOG":    logFile,
-		"FAKE_CLI_PR_URL": prViewURL,
+		"FAKE_CLI_MODE":         "gh",
+		"FAKE_CLI_LOG":          logFile,
+		"FAKE_CLI_PR_URL":       prViewURL,
+		"FAKE_CLI_PR_BODY_FILE": bodyFile,
+	})
+	return env, logFile
+}
+
+// fakeGHWithBase behaves like fakeGH but additionally records the existing
+// PR's actual base branch, so the fake `gh pr list --base X` only returns the
+// PR when X matches it - mirroring GitHub's server-side base filtering.
+func fakeGHWithBase(t *testing.T, prViewURL, prBase string) (env []string, logFile string) {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	tmp := t.TempDir()
+	logFile = filepath.Join(tmp, "gh.log")
+	bodyFile := filepath.Join(tmp, "pr-body.md")
+	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkTestBinary(t, binDir, "gh")
+	env = fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":         "gh",
+		"FAKE_CLI_LOG":          logFile,
+		"FAKE_CLI_PR_URL":       prViewURL,
+		"FAKE_CLI_PR_BASE":      prBase,
+		"FAKE_CLI_PR_BODY_FILE": bodyFile,
 	})
 	return env, logFile
 }
@@ -272,6 +337,8 @@ func newFakeBitbucketPRAPI(t *testing.T, existingPRID int, existingPRURL string)
 				api.existingPRID,
 				api.existingPRURL,
 			)
+		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/2.0/repositories/test/repo/pullrequests/%d", api.existingPRID):
+			fmt.Fprintf(w, `{"id":%d,"title":"Existing title","summary":{"raw":"Existing unconfigured description"}}`, api.existingPRID)
 		case r.Method == http.MethodPost && r.URL.Path == "/2.0/repositories/test/repo/pullrequests":
 			api.createCalls++
 			body, err := io.ReadAll(r.Body)
@@ -395,6 +462,24 @@ func fakeGlab(t *testing.T, mrViewJSON string) (env []string, logFile string) {
 	return env, logFile
 }
 
+// fakeGlabWithMRState is fakeGlab with a stateful merge request: `mr create`
+// and `mr update` record the title and description they were given, and a later
+// `mr view` reads them back, which is what the PR step verifies a published
+// body against. It returns the env, the argv log, and the state file path.
+func fakeGlabWithMRState(t *testing.T) (env []string, logFile, stateFile string) {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	logFile = filepath.Join(t.TempDir(), "glab.log")
+	stateFile = filepath.Join(t.TempDir(), "mr-state.json")
+	linkTestBinary(t, binDir, "glab")
+	env = fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":          "glab",
+		"FAKE_CLI_LOG":           logFile,
+		"FAKE_CLI_MR_STATE_FILE": stateFile,
+	})
+	return env, logFile, stateFile
+}
+
 // newTestContextWithDBRecords is like newTestContext but also inserts
 // repo and run records into the database so GetRun works after updates.
 func recordReviewApproval(t *testing.T, sctx *pipeline.StepContext, headSHA string) {
@@ -431,9 +516,10 @@ func fakeCIGH(t *testing.T, state, checksJSON string) []string {
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "gh")
 	return fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":   "ci-gh",
-		"FAKE_CLI_STATE":  state,
-		"FAKE_CLI_CHECKS": checksJSON,
+		"FAKE_CLI_MODE":        "ci-gh",
+		"FAKE_CLI_STATE":       state,
+		"FAKE_CLI_CHECKS":      checksJSON,
+		"FAKE_CLI_PR_HEAD_SHA": "deadbeef",
 	})
 }
 
@@ -442,10 +528,11 @@ func fakeCIGHMergeable(t *testing.T, state, checksJSON, mergeable string) []stri
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "gh")
 	return fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":      "ci-gh",
-		"FAKE_CLI_STATE":     state,
-		"FAKE_CLI_CHECKS":    checksJSON,
-		"FAKE_CLI_MERGEABLE": mergeable,
+		"FAKE_CLI_MODE":        "ci-gh",
+		"FAKE_CLI_STATE":       state,
+		"FAKE_CLI_CHECKS":      checksJSON,
+		"FAKE_CLI_MERGEABLE":   mergeable,
+		"FAKE_CLI_PR_HEAD_SHA": "deadbeef",
 	})
 }
 
@@ -458,6 +545,7 @@ func fakeCIGHMergeableError(t *testing.T, state, checksJSON, mergeableErr string
 		"FAKE_CLI_STATE":         state,
 		"FAKE_CLI_CHECKS":        checksJSON,
 		"FAKE_CLI_MERGEABLE_ERR": mergeableErr,
+		"FAKE_CLI_PR_HEAD_SHA":   "deadbeef",
 	})
 }
 
@@ -466,9 +554,10 @@ func fakeCIGHStateError(t *testing.T, stateErr, checksJSON string) []string {
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "gh")
 	return fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":      "ci-gh",
-		"FAKE_CLI_STATE_ERR": stateErr,
-		"FAKE_CLI_CHECKS":    checksJSON,
+		"FAKE_CLI_MODE":        "ci-gh",
+		"FAKE_CLI_STATE_ERR":   stateErr,
+		"FAKE_CLI_CHECKS":      checksJSON,
+		"FAKE_CLI_PR_HEAD_SHA": "deadbeef",
 	})
 }
 
@@ -477,10 +566,11 @@ func fakeCIGHChecksError(t *testing.T, state, mergeable, checksErr string) []str
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "gh")
 	return fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":       "ci-gh",
-		"FAKE_CLI_STATE":      state,
-		"FAKE_CLI_MERGEABLE":  mergeable,
-		"FAKE_CLI_CHECKS_ERR": checksErr,
+		"FAKE_CLI_MODE":        "ci-gh",
+		"FAKE_CLI_STATE":       state,
+		"FAKE_CLI_MERGEABLE":   mergeable,
+		"FAKE_CLI_CHECKS_ERR":  checksErr,
+		"FAKE_CLI_PR_HEAD_SHA": "deadbeef",
 	})
 }
 
@@ -505,6 +595,7 @@ func fakeCIGHSequenceMergeable(t *testing.T, state string, checks []string, merg
 		"FAKE_CLI_CHECKS_PATH":       checksPath,
 		"FAKE_CLI_CHECKS_INDEX_PATH": indexPath,
 		"FAKE_CLI_MERGEABLE":         mergeable,
+		"FAKE_CLI_PR_HEAD_SHA":       "deadbeef",
 	})
 }
 
@@ -528,6 +619,7 @@ func fakeCIGHSequence(t *testing.T, state string, checks []string) []string {
 		"FAKE_CLI_STATE":             state,
 		"FAKE_CLI_CHECKS_PATH":       checksPath,
 		"FAKE_CLI_CHECKS_INDEX_PATH": indexPath,
+		"FAKE_CLI_PR_HEAD_SHA":       "deadbeef",
 	})
 }
 
@@ -560,6 +652,7 @@ func fakeCIGHLoggedSequence(t *testing.T, state string, checks []string, mergeab
 		"FAKE_CLI_MERGEABLE":         mergeable,
 		"FAKE_CLI_LOG":               logFile,
 		"FAKE_CLI_RERUN_ERR":         rerunErr,
+		"FAKE_CLI_PR_HEAD_SHA":       "deadbeef",
 	}), logFile
 }
 
@@ -568,7 +661,8 @@ func fakeCIGHNoChecks(t *testing.T) []string {
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "gh")
 	return fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE": "ci-gh-nochecks",
+		"FAKE_CLI_MODE":        "ci-gh-nochecks",
+		"FAKE_CLI_PR_HEAD_SHA": "deadbeef",
 	})
 }
 
@@ -635,4 +729,13 @@ func fakeCIGlabSequence(t *testing.T, state string, checks []string) []string {
 		"FAKE_CLI_CHECKS_PATH":       checksPath,
 		"FAKE_CLI_CHECKS_INDEX_PATH": indexPath,
 	})
+}
+
+// runGitDirect runs git without any of the repository's step helpers, so a test
+// can observe what a plain, hook-verified git invocation does in dir.
+func runGitDirect(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }

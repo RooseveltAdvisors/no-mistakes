@@ -257,6 +257,61 @@ func TestPush(t *testing.T) {
 	}
 }
 
+func TestPushReportsNonFastForwardWithRecoveryRoute(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "dest", bare)
+	if err := Push(ctx, src, "dest", "refs/heads/main", "", false); err != nil {
+		t.Fatalf("initial Push failed: %v", err)
+	}
+
+	// Advance the remote from a separate clone, then create a divergent local
+	// commit from the old source head. This is the rebased-gate shape: the
+	// remote has a head the local source does not incorporate.
+	writer := filepath.Join(t.TempDir(), "writer")
+	run(t, t.TempDir(), "git", "clone", "--branch", "main", bare, writer)
+	run(t, writer, "git", "config", "user.email", "writer@test.com")
+	run(t, writer, "git", "config", "user.name", "Writer")
+	writeFile(t, filepath.Join(writer, "remote.txt"), "remote\n")
+	run(t, writer, "git", "add", "remote.txt")
+	run(t, writer, "git", "commit", "-m", "remote lineage")
+	run(t, writer, "git", "push", "origin", "HEAD:refs/heads/main")
+	remoteHead := run(t, bare, "git", "rev-parse", "refs/heads/main")
+
+	writeFile(t, filepath.Join(src, "local.txt"), "local\n")
+	run(t, src, "git", "add", "local.txt")
+	run(t, src, "git", "commit", "-m", "rebased local lineage")
+	sourceHead := run(t, src, "git", "rev-parse", "HEAD")
+
+	err := Push(ctx, src, "dest", "refs/heads/main", "", false)
+	if err == nil {
+		t.Fatal("divergent ordinary push unexpectedly succeeded")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"non-fast-forward",
+		remoteHead,
+		"new branch name",
+		"git switch -c <new-branch>",
+		"ref refs/heads/main is at " + remoteHead,
+		"not an ancestor of the pushed source " + sourceHead,
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("push error missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(message, "broken pipe") || strings.Contains(message, "signal:") {
+		t.Fatalf("push error hid the rejection reason: %v", err)
+	}
+	if got := run(t, bare, "git", "rev-parse", "refs/heads/main"); got != remoteHead {
+		t.Fatalf("rejected push moved remote from %s to %s (source was %s)", remoteHead, got, sourceHead)
+	}
+}
+
 func TestPushWithOptionsForwardsPushOptions(t *testing.T) {
 	ctx := context.Background()
 	src := initTestRepo(t)
@@ -283,6 +338,31 @@ func TestPushWithOptionsForwardsPushOptions(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(string(data)), "1:no-mistakes.skip=test,lint"; got != want {
 		t.Fatalf("push options marker = %q, want %q", got, want)
+	}
+}
+
+// An up-to-date push sends receive-pack no ref update, and receive-pack exits
+// without reading the push options git still writes after that, so the push
+// can die of SIGPIPE. It must succeed without opening a receive-pack session;
+// the failing receive-pack command makes any session fail every time.
+func TestPushCommitWithOptionsUpToDateOpensNoReceivePackSession(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, bare, "git", "config", "receive.advertisePushOptions", "true")
+	run(t, src, "git", "remote", "add", "dest", bare)
+	run(t, src, "git", "push", "dest", "HEAD:refs/heads/main")
+	run(t, src, "git", "config", "remote.dest.receivepack", "false")
+	head := run(t, src, "git", "rev-parse", "HEAD")
+
+	if err := PushCommitWithOptions(ctx, src, "dest", head, "refs/heads/main", "", false, []string{"no-mistakes.intent=x"}); err != nil {
+		t.Fatalf("up-to-date push with options failed: %v", err)
+	}
+	if got, _ := Run(ctx, bare, "rev-parse", "refs/heads/main"); got != head {
+		t.Fatalf("dest main = %q, want unchanged %q", got, head)
 	}
 }
 

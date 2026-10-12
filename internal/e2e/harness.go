@@ -43,17 +43,18 @@ type Harness struct {
 	AgentLog    string // every fake-agent invocation appended here, one JSON per line
 	Scenario    string // optional path to a scenario yaml; empty = built-in default
 
-	agentName         string // claude / codex / opencode
+	agentName         string // claude / codex / grok / opencode / antigravity
 	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
+	globalConfigExtra string // mirrors SetupOpts.GlobalConfigExtra
 	daemonOwn         *e2edaemon.Ownership
 }
 
 // SetupOpts controls per-test setup.
 type SetupOpts struct {
-	// Agent picks which fake the harness wires up: "claude", "codex", or
-	// "opencode". The other two binaries are still on PATH (so `auto`
-	// detection finds the requested one first via config), but only the
-	// chosen one is exercised.
+	// Agent picks which fake the harness wires up: "claude", "codex", "grok",
+	// "opencode", or "antigravity". The other binaries are still on PATH (so
+	// `auto` detection finds the requested one first via config), but only
+	// the chosen one is exercised.
 	Agent string
 
 	// Scenario is an optional path to a YAML scenario file. If empty the
@@ -69,6 +70,12 @@ type SetupOpts struct {
 	// (commands must come from the trusted default branch) pass a pointer
 	// to false to exercise the secure default.
 	AllowRepoCommands *bool
+
+	// GlobalConfigExtra is appended verbatim to the generated global
+	// config.yaml. It exists for operator-only settings a test must exercise
+	// through the real loader - agent_timeout and review_agent_timeout, whose
+	// production defaults are half an hour, are the reason it was added.
+	GlobalConfigExtra string
 }
 
 const e2eDaemonStartTimeout = "45s"
@@ -103,6 +110,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		Scenario:          opts.Scenario,
 		agentName:         opts.Agent,
 		allowRepoCommands: opts.AllowRepoCommands,
+		globalConfigExtra: opts.GlobalConfigExtra,
 	}
 
 	for _, dir := range []string{h.BinDir, h.NMHome, h.HomeDir, h.WorkDir} {
@@ -112,14 +120,18 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	}
 	h.writeLoginShellPathSeed()
 
-	// Symlink each agent name to the same fake binary. Codex and Claude
-	// dispatch by argv[0] basename; opencode the same. Symlinks (not
-	// copies) keep the build cheap on subsequent tests. The `gh` symlink
-	// is a guard rail: BinDir is prepended to PATH, so any stray invocation
-	// of gh by the pipeline (e.g. PR/CI on a misconfigured origin) hits
-	// the fakeagent stub instead of a real, authenticated system gh.
-	for _, name := range []string{"claude", "codex", "opencode", "gh"} {
-		linkPath := filepath.Join(h.BinDir, name)
+	// Symlink each agent name to the same fake binary. Native agents dispatch
+	// by argv[0] basename; opencode does the same. Symlinks (not
+	// copies) keep the build cheap on subsequent tests. The `gh` and `tea`
+	// symlinks are a guard rail: BinDir is prepended to PATH, so any stray
+	// invocation of gh/tea by the pipeline (e.g. PR/CI on a misconfigured
+	// origin) hits the fakeagent stub instead of a real, authenticated
+	// system CLI. antigravity gets a second link under its probed binary
+	// name "agy" (internal/cli/doctor.go searches that name, not the agent
+	// name). nm-fake-provider-plugin is the reference provider plugin; it is
+	// inert unless a test configures it under provider_plugins.
+	for _, name := range []string{"claude", "codex", "grok", "opencode", "pi", "antigravity", "agy", "gh", "tea", "nm-fake-provider-plugin"} {
+		linkPath := filepath.Join(h.BinDir, executableName(name))
 		if err := os.Symlink(fakeBin, linkPath); err != nil {
 			t.Fatalf("symlink %s: %v", linkPath, err)
 		}
@@ -130,6 +142,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// daemon re-execs itself, also inheriting them.
 	t.Setenv("PATH", h.BinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", h.HomeDir)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(h.HomeDir, "gitconfig-isolated"))
 	t.Setenv("NM_HOME", h.NMHome)
 	t.Setenv("FAKEAGENT_LOG", h.AgentLog)
 	if h.Scenario != "" {
@@ -137,8 +150,9 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	}
 	// Point the fake at recorded real-agent fixtures by default. When
 	// the directory contains <agent>/structured.{jsonl,*}, the fake
-	// replays those bytes verbatim instead of generating synthetic
-	// output. This is what makes the e2e a real wire-format check.
+	// replays those recorded wire envelopes instead of generating synthetic
+	// output, patching scenario-dependent fields where the adapter needs to.
+	// This is what makes the e2e a real wire-format check.
 	fixtureRoot, err := defaultFixtureRoot()
 	if err != nil {
 		t.Fatalf("fixture root: %v", err)
@@ -218,6 +232,9 @@ auto_fix:
   document: 0
   ci: 0
 `, h.agentName, h.agentName, binLink)
+	if extra := strings.TrimSpace(h.globalConfigExtra); extra != "" {
+		cfg += extra + "\n"
+	}
 	if err := os.WriteFile(configPath, []byte(cfg), 0o644); err != nil {
 		h.t.Fatalf("write config: %v", err)
 	}
@@ -461,12 +478,7 @@ func (h *Harness) WorktreeRefSHA(ref string) string {
 func (h *Harness) WaitForRun(branch string, timeout time.Duration) *ipc.RunInfo {
 	h.t.Helper()
 	return h.waitForRunStatus(branch, timeout, func(status types.RunStatus) bool {
-		switch status {
-		case types.RunCompleted, types.RunFailed, types.RunCancelled:
-			return true
-		default:
-			return false
-		}
+		return status.Terminal()
 	}, "finish")
 }
 
@@ -530,7 +542,22 @@ func (h *Harness) Respond(runID string, step types.StepName, action types.Approv
 	}
 }
 
+// RespondWithFindings answers an approval gate while explicitly selecting the
+// findings that the fix round must carry forward. An empty selection means no
+// findings, not all findings, so tests exercising review fixes should name the
+// finding IDs they intend to repair.
+func (h *Harness) RespondWithFindings(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) {
+	h.t.Helper()
+	if err := h.respondError(runID, step, action, findingIDs); err != nil {
+		h.t.Fatalf("respond to run %s step %s with %s and findings %v: %v", runID, step, action, findingIDs, err)
+	}
+}
+
 func (h *Harness) RespondError(runID string, step types.StepName, action types.ApprovalAction) error {
+	return h.respondError(runID, step, action, nil)
+}
+
+func (h *Harness) respondError(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
 	h.t.Helper()
 	p := paths.WithRoot(h.NMHome)
 	client, err := ipc.Dial(p.Socket())
@@ -538,14 +565,85 @@ func (h *Harness) RespondError(runID string, step types.StepName, action types.A
 		return fmt.Errorf("dial daemon: %w", err)
 	}
 	defer client.Close()
+	// A fix response must account for every finding the gate shows, because an
+	// omission is never a decline. The harness declines the findings the test
+	// did not select, exactly as the TUI sends the boxes an operator left
+	// unchecked.
+	var ignoreIDs []string
+	if action == types.ActionFix {
+		ignoreIDs = h.unselectedFindingIDs(runID, step, findingIDs)
+	}
 	var result ipc.RespondResult
-	if err := client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: step, Action: action}, &result); err != nil {
+	call := func() error {
+		result = ipc.RespondResult{}
+		return client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: step, Action: action, FindingIDs: findingIDs, IgnoreFindingIDs: ignoreIDs}, &result)
+	}
+	if err := call(); err != nil {
 		return err
 	}
+	if !result.OK && len(result.DeclinedEarlierFix) > 0 {
+		// A finding an earlier round of this step already chose to fix cannot
+		// be declined by a gate response. The harness declines the finding it
+		// did not select only when that is allowed; here it keeps the earlier
+		// decision instead, exactly as an operator who means "leave it fixed"
+		// would.
+		ignoreIDs = withoutIDs(ignoreIDs, result.DeclinedEarlierFix)
+		if err := call(); err != nil {
+			return err
+		}
+	}
 	if !result.OK {
-		return fmt.Errorf("respond returned not OK")
+		return fmt.Errorf("respond returned not OK: %s (%s)", result.Refusal, strings.Join(result.Missing, ","))
 	}
 	return nil
+}
+
+// withoutIDs returns the given IDs with every ID in exclude removed.
+func withoutIDs(ids, exclude []string) []string {
+	if len(ids) == 0 || len(exclude) == 0 {
+		return ids
+	}
+	excluded := make(map[string]bool, len(exclude))
+	for _, id := range exclude {
+		excluded[id] = true
+	}
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !excluded[id] {
+			kept = append(kept, id)
+		}
+	}
+	return kept
+}
+
+// unselectedFindingIDs returns the parked gate's finding IDs that the response
+// does not select, so they ride it as explicit declines.
+func (h *Harness) unselectedFindingIDs(runID string, step types.StepName, selected []string) []string {
+	h.t.Helper()
+	run := h.RunInfo(runID)
+	if run == nil {
+		h.t.Fatalf("run %s not found while computing declines", runID)
+	}
+	selectedSet := make(map[string]bool, len(selected))
+	for _, id := range selected {
+		selectedSet[id] = true
+	}
+	var ids []string
+	for _, sr := range run.Steps {
+		if sr.StepName != step || sr.FindingsJSON == nil {
+			continue
+		}
+		parsed, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+		if err != nil {
+			h.t.Fatalf("parse %s gate findings: %v", step, err)
+		}
+		for _, item := range parsed.Items {
+			if item.ID != "" && !selectedSet[item.ID] {
+				ids = append(ids, item.ID)
+			}
+		}
+	}
+	return ids
 }
 
 func (h *Harness) CancelRun(runID string) {

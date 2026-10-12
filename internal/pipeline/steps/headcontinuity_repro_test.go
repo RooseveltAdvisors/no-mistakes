@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -30,6 +31,7 @@ import (
 // anchor integrity requirement - sctx.Run.HeadSHA at the commit point is the
 // reviewed head and is NOT corrupted by the out-of-band reset.
 func TestCommitAgentFixes_RefusesToCommitOnOutOfBandResetHead(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
@@ -98,6 +100,7 @@ func TestCommitAgentFixes_RefusesToCommitOnOutOfBandResetHead(t *testing.T) {
 // The recorded head is a descendant of the live HEAD, not an ancestor, so the
 // guard must still refuse - a backward reset would also silently drop the fix.
 func TestCommitAgentFixes_RefusesOnBackwardReset(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
@@ -137,28 +140,30 @@ func TestCommitAgentFixes_RefusesResetDuringCommit(t *testing.T) {
 	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 
-	gitDir := gitCmd(t, dir, "rev-parse", "--git-dir")
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
-	}
-	hook := filepath.Join(gitDir, "hooks", "post-commit")
-	hookBody := "#!/bin/sh\ngit reset --hard " + baseSHA + "\n"
-	if err := os.WriteFile(hook, []byte(hookBody), 0o755); err != nil {
+	// The concurrent reset is driven by a git shim rather than a repository
+	// hook, so this regression keeps reproducing the incident for commits the
+	// pipeline deliberately makes hook-free.
+	realGit, err := testgit.RealGit()
+	if err != nil {
 		t.Fatal(err)
 	}
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "git")
+	t.Setenv("FAKE_CLI_MODE", "git-reset-after-commit-passthrough")
+	t.Setenv("FAKE_CLI_REAL_GIT", realGit)
+	t.Setenv("FAKE_CLI_REPLACEMENT_HEAD", baseSHA)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("reviewed fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := commitAgentFixes(sctx, types.StepDocument, "update docs", "fallback")
-	if err == nil {
+	if err := commitAgentFixes(sctx, types.StepDocument, "update docs", "fallback"); err == nil {
 		t.Fatal("expected refusal when HEAD is reset during commit")
-	}
-	if !strings.Contains(err.Error(), "not a descendant") {
+	} else if !strings.Contains(err.Error(), "not a descendant") {
 		t.Fatalf("expected a head-divergence error, got: %v", err)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != baseSHA {
-		t.Fatalf("expected hook to reset HEAD to %s, got %s", baseSHA, got)
+		t.Fatalf("expected the concurrent reset to move HEAD to %s, got %s", baseSHA, got)
 	}
 	if sctx.Run.HeadSHA != headSHA {
 		t.Fatalf("recorded head changed to %s; expected %s", sctx.Run.HeadSHA, headSHA)
@@ -171,6 +176,7 @@ func TestCommitAgentFixes_RefusesResetDuringCommit(t *testing.T) {
 // commits its own fixes: the recorded head stays an ancestor, so committing is
 // allowed.
 func TestCommitAgentFixes_AllowsForwardAgentCommit(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
@@ -198,6 +204,7 @@ func TestCommitAgentFixes_AllowsForwardAgentCommit(t *testing.T) {
 }
 
 func TestPostReviewStepsRefuseHeadClobberAtEntry(t *testing.T) {
+	t.Parallel()
 	postReviewSteps := []pipeline.Step{
 		&TestStep{},
 		&DocumentStep{},
@@ -270,6 +277,7 @@ func TestPostReviewStepsRefuseHeadClobberAtEntry(t *testing.T) {
 }
 
 func TestPostReviewStepsRefuseUnverifiableRecordedHeadAtEntry(t *testing.T) {
+	t.Parallel()
 	postReviewSteps := []pipeline.Step{
 		&TestStep{},
 		&DocumentStep{},
@@ -304,6 +312,7 @@ func TestPostReviewStepsRefuseUnverifiableRecordedHeadAtEntry(t *testing.T) {
 }
 
 func TestCIGateReconciliationRefusesHeadClobberAtEntry(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, reviewedHead := setupGitRepo(t)
 	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, reviewedHead, config.Commands{})
 	gitCmd(t, dir, "reset", "--hard", baseSHA)
@@ -324,6 +333,7 @@ func TestCIGateReconciliationRefusesHeadClobberAtEntry(t *testing.T) {
 }
 
 func TestPostReviewStepEntryAllowsEqualAndPipelineDescendantHeads(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, recordedHead := setupGitRepo(t)
 	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, recordedHead, config.Commands{})
 	postReviewSteps := []types.StepName{
@@ -360,6 +370,7 @@ func TestPostReviewStepEntryAllowsEqualAndPipelineDescendantHeads(t *testing.T) 
 // reviewed head (sctx.Run.HeadSHA), NOT on the mutable worktree, and an
 // out-of-band reset leaves that anchor intact so the guard still fires.
 func TestAssertPipelineHeadContinuity_AnchorIsRecordedReviewedHead(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 

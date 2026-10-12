@@ -22,7 +22,7 @@ const aiTrailers = "Co-authored-by: firstmate-worker <worker@example.invalid>\nC
 // with the daemon's trailer strip pointed at strip.
 func startFixRoundRun(t *testing.T, strip, branch string) *Harness {
 	t.Helper()
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value")})
 	t.Setenv(git.TrailerStripEnvVar, strip)
 
 	globalConfig := filepath.Join(h.NMHome, "config.yaml")

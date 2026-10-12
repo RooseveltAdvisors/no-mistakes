@@ -89,7 +89,7 @@ type Model struct {
 	syncService    *branchsync.Service
 	syncRefresh    func() branchsync.State
 	syncApply      func() branchsync.State
-	syncRecover    func() branchsync.State
+	syncRecover    func(bool) branchsync.State
 	syncConfirm    bool
 	recoverConfirm bool
 	syncRefreshing bool
@@ -107,7 +107,7 @@ func NewModel(socketPath string, client *ipc.Client, run *ipc.RunInfo) Model {
 		runID:               run.ID,
 		subscriptionID:      1,
 		run:                 run,
-		done:                run.Status == types.RunCompleted || run.Status == types.RunFailed || run.Status == types.RunCancelled,
+		done:                run.Status.Terminal(),
 		steps:               steps,
 		stepFindings:        make(map[types.StepName]string),
 		stepDiffs:           make(map[types.StepName]string),
@@ -432,6 +432,8 @@ func (m Model) terminalTitle() string {
 			return "✗ Failed" + suffix
 		case m.run.Status == types.RunCancelled:
 			return "✗ Cancelled" + suffix
+		case m.run.Status == types.RunCIMonitorInterrupted:
+			return "CI monitor interrupted" + suffix
 		}
 	}
 
@@ -495,7 +497,7 @@ func Run(socketPath string, client *ipc.Client, run *ipc.RunInfo, latestVersion 
 		model.syncService = service
 		model.syncRefresh = func() branchsync.State { return service.Refresh(context.Background()) }
 		model.syncApply = func() branchsync.State { return service.Apply(context.Background()) }
-		model.syncRecover = func() branchsync.State { return service.Recover(context.Background(), false) }
+		model.syncRecover = func(keepLocal bool) branchsync.State { return service.Recover(context.Background(), keepLocal) }
 		model.refreshCachedSync()
 	}
 	p := tea.NewProgram(model, tea.WithAltScreen())

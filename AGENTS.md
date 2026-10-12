@@ -1,181 +1,93 @@
 # AGENTS.md
 
-Agent memory for this repo: invariants and pointers. Deep conditional detail lives in source comments, `docs/`, and regression tests - not here.
-
-Go CLI `no-mistakes`; entry `cmd/no-mistakes`; layout map: `internal/cli`, `internal/daemon`, `internal/pipeline` (+ `steps`), `internal/agent`, `internal/tui`, `internal/git`, `internal/ipc`, `internal/config`, `internal/db`, `internal/paths`, `internal/types`. Build/test/release: `Makefile`.
-
-After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e behind `e2e` tag); `make e2e` when touching agents/e2e/fixtures; `go build -o ./bin/no-mistakes ./cmd/no-mistakes`.
-
-**Fork Routing**
-
-- `repos.upstream_url` is the PR base parent; `repos.fork_url` is optional GitHub fork push target.
-- `no-mistakes init --fork-url <url>` expects `origin` at the parent and `<url>` at the fork; plain `init` preserves fork URL on idempotent refresh.
-- Push and CI auto-fix push must use `resolvePushURL` (`internal/pipeline/steps/common_git.go`). Non-fork paths recover the credentialled upstream from the worktree `origin` at run time because DB `upstream_url` is redacted. `Repo.PushURL()` is for fork-only callers (e.g. `rebase.go`).
-- GitHub PR: `--repo` parent; `--head <fork_owner>:<branch>` when `fork_url` set. Existing PR lookup: bare branch + filter head owner; never `gh pr list --head <owner>:<branch>`.
-- GitLab/Bitbucket fork MR routing is out of scope; legacy `fork_url` on those hosts must skip PR creation, not self-PR.
-- Each run best-effort refreshes upstream/fork via `gate.RefreshRepoURLs` (origin authority; fork needs one matching clone remote; atomic DB replace; failures log bounded reason and keep old registration; never rewrite clone/gate remotes). `Repo.URLsVerified` is run-scoped trust for refreshed DB URLs.
-
-**Credential Redaction in Stored URLs and Errors (security)**
-
-- `gate.InitWithFork` redacts upstream via `safeurl.Redact` before every DB persist and gate-init log; bare gate `origin` stays credentialled via `provisionGate`. Push/CI must recover credentials from worktree `origin` (`resolvePushURL`/`resolveUpstreamURL`), never `Repo.UpstreamURL`/`Repo.PushURL()`.
-- Step failures and Bitbucket resolve-repo errors use `safeurl.RedactText`/`safeurl.Redact`. New redaction sites: `internal/safeurl` only.
-- Regressions: `TestInitRedactsCredentialURL`, `TestResolveUpstreamURL_*`, `TestResolvePushURL_ForkWinsOverCredential`.
-
-**Documentation**
-
-- `README.md` stays high-level; facts live in `docs/`. Config keys: `docs/src/content/docs/reference/global-config.md`, `repo-config.md`; env/telemetry split: `environment.md`; daemon model: `docs/src/content/docs/concepts/daemon.md`. Guides link; they do not duplicate tables.
-- `document.instructions` in `.no-mistakes.yaml` owns placement policy for the document step.
-
-**Agent-Guidance Surfaces**
-
-- Generated skill: `internal/skill/skill.go` body, then `make skill`; never edit `skills/no-mistakes/SKILL.md` directly.
-- Driving guidance: skill body + live `axi` strings (`internal/cli/axi*.go`); `docs/src/content/docs/guides/agents.md` pins sentences via `axi_guidance_test.go`.
-- `internal/testguidance` default test-quality rule: task-first skill and pipeline roles that author/repair/review tests only.
-- Review auto-fix defaults off (`auto_fix.review: 0`); qualify skill, axi notes, and docs if you change it.
-
-**Context, Concurrency, and Processes**
-
-- Thread `context.Context`; `exec.CommandContext`; timeouts on networked work.
-- Long-lived cancellable children: `shellenv.ConfigureShellCommand` (process group + `cmd.Cancel`). One-shots: `RunShellCommand`/`OutputShellCommand`/`CombinedOutputShellCommand`, or `StartShellCommand` + `TerminateShellCommandGroup` - `cmd.Cancel` alone does not reap on clean exit (#357 OOM). `WaitDelay` 5s backstop. Regressions: `TestCodexAgent_Run_ReapsLeakedGrandchildOnCleanExit`, `TestRunShellCommandWithEnv_*`, `TestTerminateShellCommandGroup_*`.
-- `internal/procreap`: cwd-under-worktree identity reaping; spares pending/running runs; startup + per-run sweeps. Windows: job objects. Regressions: `internal/procreap`, sweep tests.
-- Windows console children: `winproc.Harden(cmd)` (`shellenv` already calls it).
-
-**Recursive Gate-Execution Containment**
-
-- `internal/gatecontext` classifies nested pipeline control (gate common-dir + IPC peer ancestry); `NO_MISTAKES_GATE` diagnostic only. Read-only axi status/logs, help, doctor stay available.
-- Phase boundary: `internal/gateguidance` in prompts and generated skill; step agents never control push/PR/CI.
-
-**Filesystem and Paths**
-
-- `filepath.Join`; `NM_HOME` for state; `0o755` dirs / `0o644` files. macOS: resolve symlinks for comparisons.
-
-**Git on Bare Gate Repos (`safe.bareRepository`)**
-
-- Gate git via `git.Run` (`--git-dir` on bare); never bare discovery via `cmd.Dir`/`-C` (#362). Migration DB-authoritative; `git.RunBare` on legacy paths. Regressions: `TestRunOnBareRepoUnderSafeBareRepositoryExplicit`, migration tests.
-
-**`gh` From Bare Gate (`internal/scm/github`)**
-
-- Name PR explicitly (`prSelector`: number, else URL, else fail closed). Empty positional infers `main` and misses feature PRs.
-- Regressions: `TestGetChecksTargetsKnownPRByURLWhenNumberMissing`, `TestPRTargetingReadsFailClosedWithoutIdentity`, `TestUpdatePR*`.
-
-**Post-Receive Hook (`internal/git/hook.go`)**
-
-- `--gate` must be absolute (not `$(pwd)` / `.` #269). `normalizeNotifyGatePath` in `daemon_cmd.go` second layer.
-
-**Daemon Singleton Lock (`internal/daemon/lock.go`)**
-
-- One daemon per `NM_HOME`: exclusive `daemon.lock` first in `RunWithOptions`, before recovery/socket; held for life.
-- Readiness = IPC health, not PID alone; stop waits for process exit (releases lock). Socket: dial-before-unlink; bounded dial (`daemon_connect_timeout`). `daemon run --root` explicit only.
-- Never remove worktrees with `pending`/`running` runs. User model: `docs/src/content/docs/concepts/daemon.md`.
-
-**Bounded Logging and Event-Driven AXI**
-
-- `internal/logstore` bounds daemon/managed/bootstrap logs. Read IPC at DEBUG; mutations INFO; failures WARN.
-- `internal/cli/run_reconciler.go` owns subscribe-first axi driving; no fixed `get_run` polling.
-
-**Bounded Loss-Aware Event Subscriptions**
-
-- `ipc/events.go` `ClassOf` taxonomy; `daemon/eventmailbox.go` overflow (64 events, 1 MiB; activity evictable; `stream_gap` sticky).
-- `StateRev` on state + snapshots; subscriptions open gapped. Step diff on demand: `ipc.MethodGetStepDiff` (512 KiB cap), not stream.
-
-**Destructive Daemon Lifecycle Guard (`internal/lifecycle/guard.go`)**
-
-- `daemon stop`/`restart`/`update` refuse with active runs unless `--force`; log caller to `<NM_HOME>/logs/cli.log`.
-
-**Testing Conventions**
-
-- E2e for cross-boundary behavior (`e2e` tag; `make e2e` / `scripts/e2e.sh`). Real git temp dirs over mocks.
-- `internal/e2edaemon` owns test daemons; never reap shared `~/.no-mistakes`.
-- Git packages: unset `GIT_CONFIG_COUNT` in `TestMain`. Daemon-touching packages: isolated `NM_HOME`/`HOME` in `TestMain`.
-- `paths.New()` refuses default root under `go test` unless `NO_MISTAKES_ALLOW_DEFAULT_ROOT_IN_TESTS=1`.
-- Windows CI: git-heavy shard split; `*_windows_test.go` suffix is GOOS-only. macOS `-race` git segfault: fork pre-exec child, not repo bug.
-
-**Repo Config Trust Boundary (security)**
-
-- `commands.{test,lint,format}` and `agent` from trusted default branch pinned SHA, never pushed SHA (`loadTrustedRepoConfig`, `assertGateTrustedConfigReadable`).
-- Trusted-only regardless of `allow_repo_commands`: `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`. `allow_repo_commands` default false on trusted branch only.
-- `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
-- Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
-
-**CI Monitor Lifecycle**
-
-- `ci_timeout` idle; re-arms on default-branch tip via `timeoutAnchor` only extends. Semantics: `config.go` + `global-config.md`.
-- Empty check list not green without proof; trusted `no_ci` with zero checks OK (`ci.go`, `cimonitor`).
-- `axi abort --run <id>` reaps orphan monitor without daemon. Terminal PR state monotonic; completes active runs.
-- Cancelled checks: rerun before CI fix; budget per name; no rerun after head != `runs.head_sha`. `ci_transient.go` owns classification/retirement.
-- Terminal cancel bucket != pending (#628). Live rollup head, not recorded SHA only.
-- Regressions: `TestCIStep_*`, `TestChecksPassed_PR607RealLogSequence`, `TestEffectiveRepoConfig_NoCITrustedOnly`.
-
-**Parked / Awaiting-Agent Signal**
-
-- `runs.awaiting_agent_since` set only at approval/fix_review gates; observability only.
-
-**Review-Loop Sessions (`internal/pipeline/sessions.go`)**
-
-- One fixer session per run; every review turn session-free (rereview never resumes prescriber session). Fail-safe: cold on unsupported adapter; failed resume retries fresh; `session_reuse: false` forces cold.
-- Codex resume narrower flags; fakeagent parses both argv shapes.
-
-**Uncertified Review (`internal/pipeline/uncertified.go`)**
-
-- Review fixer commit without completed rereview persists per-branch range; next initial review binds `fixRoundProvenanceClause`. Clear only on completed review at/after `to_sha`; rebase remaps SHAs.
-
-**Review Fixer Verification (`internal/pipeline/steps/review.go`)**
-
-- Fix round: focused verification in changed area only; no full-repo test/lint in fix prompt (Test/Lint steps own gates).
-
-**Local Test (`internal/pipeline/steps/test.go`)**
-
-- Targeted validation only; broad regression is CI (`go test -race ./...` in `.github/workflows/ci.yml`). Empty `commands.test` here by design; do not add full suite locally.
-
-**Intent Provenance (`internal/pipeline/steps/intent_prompt.go`)**
-
-- Explicit `--intent` -> agent source (authoritative criteria); inferred keeps hint framing. Agent-source conformance contradictions -> `ask-user` at review. Pre-push review strips deferred pipeline-delivery-only findings (`pipeline_delivery.go`). Missing finding `action` -> `ask-user` (`ActionOrDefault`).
-
-**Test Evidence (orphan branch)**
-
-- Evidence in `StepContext.EvidenceDir`, never on code branch. `internal/evidence` fail-closed publish; links pin commit; `test.evidence.branch` trusted-only.
-
-**Scratch Paths**
-
-- Evidence under `<NM_HOME>/evidence/<runID>` (`paths.EvidenceDir`), never `os.TempDir()`. Executor resolves once into `StepContext.EvidenceDir`. Eval replay sandboxes stay in system temp (held scope).
-
-**Document+Lint Housekeeping**
-
-- Empty `commands.lint`: document step does lint stash on `RunShared`; lint consumes or falls back. Placement policy: one owner per fact; no AGENTS postmortems; no corpus sweeps.
-
-**Local Eval (`internal/eval`)**
-
-- Global-only keys in `config.yaml` (not env); auto-capture after terminal outcome. Gold by recorded fix/skip + merge; `diversified` pinned gold-only. Shared object pools, not per-case bundles. Details: `docs/src/content/docs/reference/eval.md`.
-
-**Telemetry**
-
-- Read surfaces: no pageview; `ReadSurfaceGate` on fingerprint. Perf local-only (`agent_invocations`); remote terminal run event counts only. `internal/agent/invocationmetrics.go` owns fidelity fields.
-
-**Branch Sync (`internal/branchsync`)**
-
-- `sync`/`axi sync`/TUI `u`: guarded FF or equivalent-diverged reset; `--recover` and `--keep-local` rules in `Recover` doc comment in `sync.go`. Push bindings persist SHA/fingerprint/generation. Cancellation unmoved head -> `user_owned`, not recoverable custody.
-
-**Post-Review Head Continuity and Push**
-
-- Post-review steps call `assertPipelineHeadContinuity`. Push uses `review_approved_head_sha` only (exact or descendant), not mutable `HEAD`/`head_sha`.
-
-**Rebase and Force-Push Safety (`internal/pipeline/steps/forcepush.go`)**
-
-- Prefer refuse over clever recovery. Rebase bases from fresh remote refs; unpushed local default commits park (#283).
-- `resolveForcePushDecision`: live remote read; allow only safe anchors; fetch failure fails closed.
-- `lastSeenSHA` is last observed head, not live tip before push (#281); rebase refreshes `origin/<branch>` on normal push only, not force push.
-
-**macOS Release Signing**
-
-- Developer ID `com.kunchenguid.no-mistakes`, Team `9T2J7MNUP9` permanent. `.github/workflows/release.yml`; `TestReleaseWorkflow*`.
-
-**GitLab Backend (`internal/scm/gitlab`)**
-
-- `glab v1.5x` drift traps in `gitlab.go` comments (host-scoped auth, no `--state opened`, jobs via API).
-
-**When Making Changes**
-
-- New dependencies: check docs, discuss. TDD for bugs and features.
+This file is for agentic coding tools working in this repo.
+
+This repository is a Go CLI app named `no-mistakes`.
+The binary entrypoint is `cmd/no-mistakes`; implementation code lives under `internal/`, and the package names there are the layout map (CLI in `internal/cli`, daemon in `internal/daemon`, pipeline and steps in `internal/pipeline`, agent adapters in `internal/agent`, terminal UI in `internal/tui`, shared infrastructure in `internal/git`, `internal/ipc`, `internal/config`, `internal/db`, `internal/paths`, `internal/types`).
+Build, test, and release commands are owned by the `Makefile`; read it for the full target list instead of relying on a copy here.
+
+Safest local verification sequence after non-trivial changes:
+
+- `gofmt -w .`
+- `make lint` (generated-skill drift check plus `go vet`)
+- `go test -race ./...` (the e2e suite is behind the `e2e` build tag and excluded)
+- `make e2e` when touching agent integrations, the e2e harness, or recorded fixtures
+- `go build -o ./bin/no-mistakes ./cmd/no-mistakes`
+
+## Where detail lives
+
+- User-facing semantics: the docs site under `docs/src/content/docs/` (`reference/repo-config.md` and `reference/global-config.md` own config keys, `reference/pipeline-steps.md` owns step behavior, `reference/environment.md` owns env vars and telemetry, `concepts/gate-model.md` and `concepts/daemon.md` own those models).
+- Per-area implementation maps (owning functions, invariants, regression lists): `.agents/skills/<area>/SKILL.md` (`.claude/skills` is a symlink to it). Read the matching skill before changing that area.
+- Provider CLI traps (glab flag drift, tea JSON shapes, Origin's draft-by-default create, GitHub user-attachments, opencode failure wire shape and retry gating) are owned by the comments in `internal/scm/gitlab/gitlab.go`, `internal/scm/gitea/gitea.go`, `internal/scm/origin/origin.go`, `internal/scm/github/attachments.go`, and `internal/agent/opencode*.go`; extend them there when you hit new drift.
+- `skills/no-mistakes/SKILL.md` is generated from `internal/skill/skill.go`; never hand-edit it, `CHANGELOG.md`, or other generated files.
+
+## Invariants every change must keep
+
+- Repo config trust boundary (security): `commands.*` and `agent` come from the trusted default branch at a pinned, freshly fetched SHA and the run fails closed when that config cannot be read; `allow_repo_commands` is trusted-only and defaults false. Every other trusted-only field listed in `reference/repo-config.md` stays trusted-only regardless of `allow_repo_commands` (`pr.base_branch` is the one opt-in exception). No trusted-config selection may depend on a pushed-branch field, and `review.path_instructions` matches the complete changed-file set, never the `ignore_patterns`-filtered one. Owner: `repository-routing-security` skill.
+- Under `disable_project_settings`, only adapters with verified effective suppression of the target repo's project instructions may launch; anything unverified fails closed (Grok is refused, and an `acp_registry_overrides` entry for `omp` fails closed). Owner: `repository-routing-security` skill.
+- An existing PR's live forge base outranks a since-changed `pr.base_branch`, and PR lookup matches by branch alone so a base change never opens a duplicate PR. Owner: `pr.base_branch` in `reference/repo-config.md`.
+- Repository `gates` can never skip, reorder, or replace a core step, and `--skip` refuses gate names. Only `rebase`, `review`, `test`, `document`, and `lint` are anchors; a run's gate list is pinned once and an unparseable pin fails recovery closed. Owner: `repository-routing-security` skill.
+- A per-run Pi pin is immutable and fully validated before it supersedes an active run.
+- Test: pass/fail scenarios must be live and untested ones need a reason; `untested` never parks; the evidence turn is unconditional; the analyzer correction turn stays correction-only (no tools, scenario reruns, or external operations). Do not weaken these to avoid the analyzer correction retry.
+- Test verdicts: `no-surface` and `inconclusive` park for an operator decision, a `fail` scenario with any verdict but `no-go` is rejected, `no-surface` with any live or pass/fail scenario is rejected, and the attestation omits `live_validation` once the head moves past the validated one. Owner: `pipeline-review-and-agents` skill.
+- A Test `no-go` verdict parks as an auto-fixable error. Owner: `.agents/skills/pipeline-review-and-agents/SKILL.md`.
+- Review: an unreadable review never passes (bounded schema reruns, fix-mode turns never retried); a clean review certifies the head only with `reviewed_paths` covering every trusted reviewable path; a selected finding leaves the append-only outstanding set only on positive coverage or an explicit operator decision, except a selected finding with no file anchor, which can never match coverage and clears only on a positive verification round covering every reviewable path that no longer reports it (upgrade compat for pre-removal recorded-decision findings). Recovery never lets a reused positional finding ID alias an unrelated finding as selected (`retainFindingIDsByIdentity`). The loop is bounded only by `auto_fix.review` and the gate.
+- Review retries: findings come only from the attempt that validates; Claude's `error_max_structured_output_retries` fails the step with no second retry layer; a crash-resumed fix round fails closed, and a validation restart at Review starts a fresh carry set. Owner: `pipeline-review-and-agents` skill.
+- An approval override is never a silent clean pass: CI overrides and qualifying Test exceptions record their unresolved condition and surface as `passed-with-override`; do not reuse the configured-command `override_reason` for every Test approval. `verify.py` refuses a configured-command Test override unless trusted `test.allow_approve_over_failure` records a reason, and a CI-repair restamp never copies a previous `allow_test_command_override`. Owner: `pipeline-review-and-agents` skill.
+- The CI step never counts or limits fix rounds (the executor enforces `auto_fix.ci`); review-bot checks park as ask-user and never spend a round; a published repair must call `sctx.MarkRunning()`. Classification reads provider structure only, an empty check `App` is never a review bot, and `step_results.ci_fix_attempts` is never read. Owner: `ci-monitor` skill.
+- After a CI repair, a still-red check without fresh evidence keeps the monitor waiting rather than re-escalating. Owner: `.agents/skills/ci-monitor/SKILL.md`.
+- `types.Finding` fields are copied explicitly by `Finding.UnmarshalJSON` and `findingWire`; a new field must be added there or it drops on every parse.
+- `rebase.strategy: merge` proves the merge (`mergeWithAgent`) rather than trusting the agent, and a rejected attempt is restored to the pre-merge head, fail-closed; its additive resolver prompt must not be unified with the rebase prompt. The merge target is resolved to a SHA before `git merge`, an unrecognized `rebase.strategy` fails the config closed, and a fast-forward publishes without `--force`. Owner: `branch-sync-and-push-safety` skill.
+- Push attests the proposed head in an existing PR before pushing, and an attestation write failure aborts the push; the protocol is single-publisher by design (no cross-publisher coordination without a separate requirement). Private-mirror reconciliation bypasses patch proof in exactly two cases, both owned by `concepts/gate-model.md`: (a) the run's exact submitted or last-pushed head (Decision 41-A), and (b) a private-only commit reachable from a `refs/no-mistakes/recover/<run>` anchor (issue #1233). (b) is a PRESERVATION credit only - never containment evidence and never a head exception: containment is still proven only by ancestry or tree survival, Decision 41-A remains the only head exception, archive-before-delete is unchanged, and a symbolic or non-commit anchor credits nothing; ownership never proves containment.
+- Private-mirror reconciliation archives a branch's exact head before deleting its ref and restores that archive when settlement fails and no intervening ref appeared; `push.go` settles shared gate/worktree refs only once. Owner: `concepts/gate-model.md`.
+- OpenCode: a failed turn that already ran a tool is never retried or sent through the prompt-only fallback (both replay its side effects in a fresh session), and retry trusts opencode's `isRetryable`, never substring matching. Errors decode from the nested `data` payload, and the general `info.error` branch stays after the tool-choice conflict checks that trigger the fallback. Owner: comments in `internal/agent/opencode*.go`.
+- Provider CLIs: glab's auth check is host-scoped and `glab mr update` never gets `-y`; every tea call carries `--login`, tea's list and single-PR JSON shapes stay separate structs, retargeting uses `tea api --method PATCH`, `CreatePR` re-lists instead of scraping stdout, Gitea runs are picked by highest run ID, and Gitea `MergeableState` stays declined. Owner: comments in `internal/scm/gitlab/gitlab.go` and `internal/scm/gitea/gitea.go`.
+- Provider plugins (`provider_plugins`) are global-config only: repository config can never declare, select, or override one, since each is an executable the daemon runs. A plugin claiming a host outranks forge profiles and built-in detection, and a host may not be both a plugin host and a forge-profile host (config load compares literal tokens; `forgecontext.RefuseProviderPluginOverlap` refuses an overlap that appears only after SSH alias resolution when a run starts or recovers). The plugin is an AXI-shaped CLI (subcommands, `--flag=value`, `--json`, PR bodies only via a private `--body-file`, never argv or stdin). Anything the adapter cannot validate (output shape, protocol version, PR identity, check bucket, merged-proof head, a declared capability answered `unsupported`, a timeout) is `plugin.ErrProtocol`, which fails the step and the pre-push attestation instead of skipping (`pluginContractBroken`), in the `status` handshake and in every later call; only the CI monitor's repeated polls and its failed-log retrieval tolerate a timeout (`plugin.ErrTimeout`, `pluginPollFailsStep`); one-shot reads and the repair path use `pluginContractBroken`. A `pr find` without a `pr` key, a handshake without `max_pr_body_chars`, and a PR URL that does not name the `--repo` path or differs from the run's held URL are all violations; only a non-zero `status` exit or a missing command skips with a reason, like a logged-out built-in CLI. An operation whose capability is false is never invoked. Owners: `internal/scm/plugin`, `internal/config/provider_plugins.go`, `reference/provider-plugin-protocol.md`.
+- The pipeline adds PR closing references only from `axi run --closes` (claimed once per PR body; a later reattach is refused, never reported as applied); closure is never inferred, and the PR step verifies every requested reference on the live PR before reporting success. Owner: `internal/pipeline/steps/pr_closing.go`.
+- GitHub user-attachment uploads fail closed: any error or refusal keeps the prior PR rendering, never a dead attachment URL. Owners: `internal/scm/github/attachments.go`, `test.evidence.attach_media` in `reference/global-config.md`.
+- Custody recovery fails closed without Git mutation on any missing, moved, or ambiguous evidence; plain `--recover` still refuses (`--recover --keep-local` is the explicit discard), and keep-local never selects an archive. Owner: `branch-sync-and-push-safety` skill.
+- `require-no-mistakes` reads PR facts from a live API lookup and fails closed when it cannot, never from a possibly stale replayed event.
+- `axi status` and `axi logs` resolve an implicit run from the caller's current branch only; there is no repo-wide fallback, and every explicit `--run <id>` selection is observation-only (no bare `axi respond` command, since a newer run on that branch could receive it), except `axi respond --run <id>`, which names the exact run and so has no newer-run hazard. Owner: `resolveRun` and the status comments in `internal/cli/axi_query.go`.
+- `agent.MemoryFilesRule` limits independently initiated memory-file edits, not review of those files or prompted fixes; the document step may only correct factually wrong content, and conflict resolvers use `agent.MemoryFilesConflictRule`. Do not reintroduce exhaustive doc-sweep language into the document prompt. Owner: `documentation-guidance` skill.
+- The combined document+lint pass never silently drops the lint duty (any doubt falls back to lint's own pass), uncategorized findings fail safe to the stricter documentation gate, and a configured `commands.lint` stays a deterministic gate.
+- `runs.awaiting_agent_since` is observability only and never changes gate resolution.
+- `runs.awaiting_agent_since` is set exactly while a gate is parked. Owner: `.agents/skills/pipeline-review-and-agents/SKILL.md`.
+- The daemon's effective environment comes from the login-shell probe at startup, never from the service definition's bootstrap `PATH`; only a missing shell binary is waited for, and only at startup. The probe runs in its own session (Setsid); do not fold it into `ConfigureShellCommand` (Setpgid and Setsid cannot be combined). Owner: `daemon-runtime` skill.
+- Telemetry: read-only surfaces (`axi` home/status/logs, `status`, `runs`) emit no remote telemetry. Performance detail stays local; prompts, outputs, diffs, and raw command arguments are never stored (`TestAgentInvocations_PrivacySafeShape`), and run IDs, paths, and session identities are never sent remotely; a not-reported metric is stored as NULL, never a fabricated zero. Owner: `reference/environment.md`.
+- `no-mistakes update` reads only `channels.json` from the release-asset CDN, never `api.github.com`, and `release.yml` must call the channel publisher after `finalize`. Owner: `release-signing` skill.
+- The retired `jev` config key stays a parse-only tombstone; do not repurpose it.
+
+## Test and CI conventions
+
+- Pipeline-step tests put the non-race `internal/pipeline/fakecli` helper on PATH as `gh`/`glab`/`git`, and use `internal/testgit.RealGit` for the real binary. Never re-exec the race-instrumented test binary as those names.
+- CI-monitor tests live in `internal/pipeline/steps/citest`; keep both packages under `go test ./...`, not behind the `e2e` tag.
+- Any `go.mod`/`go.sum` change must recompute `vendorHash` in `package.nix` (set it to `lib.fakeHash`, run `nix build`, copy the `got:` hash); the `Nix flake` workflow fails otherwise and names the hash.
+- The rest is owned by the `testing-conventions` skill.
+
+**The Review Conversation (`internal/reviewqa`, `internal/pipeline/steps/review_questions.go`)**
+
+- The whole feature is OPT-IN and off by default: trusted `review.conversation` (repository-only, like `document.instructions`; `internal/config`). `reviewConversationEnabled` in `internal/pipeline/steps/review_questions.go` is the one owner of that condition, and `reviewConversationDir` returning "" is the ASK-side off-switch every consumer keys on. The READ side is separate and keyed on the conversation being on disk (`reviewConversationReadDir`, and `Executor.ReviewConversationAnswerDir` for the daemon's answer handler): a question asked while the channel was open stays answerable even after the setting is turned off, or after a trusted-config fetch fails and recovery resolves it the same way, which otherwise stranded a parked run for good. Both read-side halves move together - the answer path AND the review step's finalize turn - because opening only the write side lands the answer on disk, releases the gate, and runs a finalize turn that never sees it while `axi answer` reports `reviewer_resumed: true`. Emitting a question finding stays ASK-keyed, because that is what parks the step. The off-state guarantee holds because a repository that never opted in cannot have a questions file. Regressions: `TestReviewStep_FinalizeTurnDeliversAnswersEvenWithTheSettingOff` (mutation-checked), `TestAnswerReviewQuestionOnDiskQuestionSurvivesTheSettingBeingTurnedOff`, `TestReviewStep_ResumeApprovalGateOnlyWhenTheConversationIsSettled` - prompt protocol, the ndjson files, question findings, the settled-questions and superseded-rounds sections, the reviewer session, the PR body's group, and (via `Executor.ReviewConversationEnabled`) `axi answer`'s refusal. A new part of the protocol must key on the same condition; `TestReviewStep_ConversationOffIsTodaysReview` asserts the off prompt is the on prompt minus the protocol and nothing else, so a missed gate fails there. Regressions: `TestEffectiveRepoConfig_ReviewConversationTrustedOnly`, `TestMerge_ReviewConversationDefaultsOffAndComesFromTheRepo`, `TestReviewStep_ConversationOffIgnoresQuestionsAlreadyOnDisk`, `TestAnswerReviewQuestionRefusesWhenTheConversationIsOff`, `TestReviewStep_SupersedeCarriesThePreviousRunsReviewRounds/conversation_off`.
+- The reviewer emits each substantiated larger question mid-turn to two append-only ndjson files in the run's evidence dir (`reviewqa.Dir(sctx.EvidenceDir)`), keeps reviewing, and re-reads answers at its own checkpoints. That directory is shared with the run's PUBLISHABLE test evidence, so the conversation is excluded from the publication walk by name (`reviewqa.DirName` -> `evidence.Request.ExcludeDirs` -> `collectFiles`, which skips it WHOLE so it is never published and never counted against the size/file budgets either): the only published copy is the bounded, home-path-redacted PR-body rendering, never the raw questions, answers and `answered_by`. Regressions: `TestPublish_ExcludedDirectoryIsNeverCollected`, `TestPublish_ExcludedDirectoryAlonePublishesNothing`, `TestPublishRunEvidence_NeverPublishesTheReviewConversation`. `internal/reviewqa` is the only parser; the reviewer writes with its own file tools, so there is deliberately no MCP server. That package therefore owns `AppendAnswer` (the daemon's answer handler) and NO question writer at all: a Go one would default `kind` and `weight`, so every fixture through it left the reader's absent-field branches unexercised while the agent's real lines omit them. Tests append the raw line instead (`appendAgentQuestionLine`, one per package) and self-check that the seed read back, because "nothing is open" is also true of a conversation the reader discarded. Design, state machine, and rationale are owned by `docs/src/content/docs/concepts/review-conversation.md`; per-step behavior by `docs/src/content/docs/reference/pipeline-steps.md`.
+- `axi` renders an open question as an ORDINARY finding row (`question-<id>` plus the reviewer's own description) and nothing else: the structured `review_questions`/`waiting_on` block was deleted (captain's ruling), because reconstructing question and options by string-splitting the prose `openReviewQuestionFindings` had just formatted was a lossy round trip that rendered a wrong row for any question whose text contained its own `Options: ` line. Both surviving affordances - the gate help and the home-view help - key on `pipeline.HasUnansweredReviewQuestion`, never on the ID prefix or the prose. AXI never bounds a finding description, so a long question's options line always survives in its row. Regressions: `TestReviewQuestionGate_LeadsWithAnswering`, `TestReviewQuestionGateHelpKeysOnTheCategory`, `TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion`.
+- An unanswered question becomes one ask-user warning per question (`types.FindingCategoryReviewQuestion`, finding ID `question-<qid>`), which reuses the EXISTING approval park - so `awaiting_agent_since`, `parked_ms`, IPC, TUI and `axi` all work unchanged, and `review_agent_timeout` cannot count the wait because the agent turn already ended. Do not add a durable "waiting-on-answers" step status.
+- Reusing the approval park has one cost, and `pipeline.ApprovalGateResumer` pays it: the park is released by a response, and an answer landing between `Execute` returning its question findings and the executor registering the gate as waiting cannot release anything, so the gate parked on a stale snapshot with no reviewer left. `ReviewStep.ResumeApprovalGate` re-checks the conversation on the `gate_reconcile_interval` timer and returns `types.ActionAnswer` - it RESUMES, and must never resolve/complete, because `ApprovalGateReconciler`'s `true` completes the step and would approve the head off that stale snapshot. Its three guards are all load-bearing: a conversation may be READ (the ask/read split above), the gate really carries review-question findings (else an operator's verdict on ordinary findings is stolen), nothing open. `CIStep`'s completion semantics are untouched. A resumer resolves the conversation from `sctx.EvidenceDir`, so `Resume`'s own recovered-gate `StepContext` must set it too or the resumer declines silently on every tick of exactly the restart park it exists for. Regressions: `TestReviewStep_AnswerRacingTheParkStillReachesTheReviewer`, `TestReviewStep_ResumeApprovalGateOnlyWhenTheConversationIsSettled`, `TestReviewStep_ResumeApprovalGateFailsClosedOnUnreadableFindings`, `TestExecutor_RecoveredGateResumerReceivesTheRunsEvidenceDir`.
+- `no-mistakes axi answer` (never `axi respond --action answer`; the CLI refuses that action, and answer itself takes no `--run` - its run is the current branch's active run, because a second selection path on a mutating command is what the branch-scoping prevents, so it must be run from a clone of the repository whose run it answers) goes through `ipc.MethodAnswerReview` -> `RunManager.HandleAnswerReviewQuestion`, which appends the answer and releases the gate with `types.ActionAnswer` only when nothing is open. The answer that closes the last open question then follows the run like `axi respond` (`followAnsweredReview`), keyed on `AnswerReviewQuestionResult.ClosedLast` or `Resumed` - `Resumed` alone cannot carry it (it is false for an answer that lands before the park registers and is released by the gate's resumer instead), and it is accepted only so a daemon older than `closed_last` still follows; that late park briefly still lists the answered question, so a question park seen right after the answer gets one `gate_reconcile_timeout` (owning root's global config) to leave before it is returned as a new question. Regressions: `internal/cli/axi_answer_follow_test.go`, `TestAnswerReviewQuestionClosingAnswerOnAParkedGateResumesAndClosesLast`. `Executor.ReviewConversationAnswerDir` is the single owner of the path the answer handler appends to, because it depends on effective config AND on what is already on disk. An answer round's trigger is `"answer"`, is not an `IsFixRound()`, and records NO round selection - a selection would read as the human declining the round's findings. A question can be asked by a rereview INSIDE a fix round, so its gate parks as `fix_review`, and BOTH answer paths (the live loop and `Resume`) must hand the finalize turn that gate's `Fixing` plus `SkipFixExecution`: the status is what the auto-resolvers branch on, so a recovered path that dropped it re-parked as `awaiting_approval` and cost an extra pipeline-authored fix round. `FinalizingAnswers` and `Fixing` are therefore NOT mutually exclusive, `SkipFixExecution` is what keeps the fixer off already-fixed code, and `executeStep`'s trigger switch must test `answering` BEFORE `fixing` or a human's answer persists as an `auto_fix` round. Regressions: `TestExecutor_RecoveredAnswerRoundIsTriggeredAsAnAnswer`, `TestExecutor_RecoveredAnswerRoundInheritsAFixReviewGatesContext`.
+- The review conversation meets upstream's append-only outstanding finding set in three places, and all three carve-outs are narrow and deliberate. A review-question finding never joins the carry-forward at all (`dropReviewQuestionFindingsJSON`, keyed on `types.FindingCategoryReviewQuestion`, never the `question-` prefix): a question is resolved by its ANSWER and not by a coverage record, and every review turn re-emits every still-open question from the live conversation, so dropping it loses nothing. The same helper is applied to the round's own output before it becomes `resolveVerifiedFindingsJSON`'s verification input, because a question's file is optional and the omission marker never has one, so leaving them in made `hasUnanchoredFinding` true and refused to clear ANY selected finding while a question was open. And an answer round NEVER earns `pendingVerificationIDs`: a fix round earns them when a selection is DISPATCHED, because the code then changed and coverage silence is evidence the change worked, while an answer changes only what the reviewer knows, so the same silence proves nothing - seeding the carried set there (the earlier rule) let a finalize turn clear any carried finding whose file it happened to cover, including one the answers had no bearing on. Instead the carried set rides the PROMPT on both paths (`StepContext.CarriedFindings`, set in the live loop's `ActionAnswer` case and in `Resume`) and the turn re-adjudicates it item by item: still holds -> report it again, disproved -> name it in `withdrawn_findings` with a reason, and anything left out of both is KEPT. `dropWithdrawnFindingsJSON` is the only way a finding the answer round merely CARRIED leaves; a finding an earlier fix round dispatched keeps its pending-verification entry and can still clear on a coverage record, because that code did change and the finalize turn is its rereview. The coverage rule itself is untouched for every other round type. Rationale is owned by `docs/src/content/docs/concepts/review-conversation.md` (The finalize turn re-adjudicates what it carried in). Regressions: `TestExecutor_ReviewCarryForward_AnOpenQuestionDoesNotBlockVerification`, `TestExecutor_ReviewCarryForward_AnAnswerRoundWithdrawsByName`, `TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding`, `TestExecutor_RecoveredAnswerRoundKeepsTheOutstandingFindings`.
+- `SessionRoleReviewer` spans one review PASS (asking turn + finalize turn) and never a code change, and only when a conversation may be READ (the ask/read split above) and `session_reuse` is on - otherwise every review turn is session-free as before: `review.go` calls `Sessions.Forget(SessionRoleReviewer)` before any fix round, and a new run gets a new `RunSessions`. The finalize prompt is the WHOLE review prompt plus the answers, so a failed resume degrades to a cold review instead of a meaningless one.
+- Answers persist per branch in `review_questions` (`db.RecordReviewAnswer` / `GetBranchReviewAnswers`), which feeds the reviewer's "Settled questions on this branch (do not re-raise)" section - rendered separately from acceptance criteria - and the PR body's `### Review conversation` group inside the Pipeline section. The store is keyed `(repo, branch, question_id, run_id, ask_ordinal)` - one row per settled ASK, written from `reviewqa.Conversation.SettledAsks()`, because `Entry` collapses an id to its LATEST state and so cannot supply an earlier ask's pairing - and `reviewqa.Load` settles an ask ONLY with an answer stamped with that ask's own `ask_ordinal` (`reviewqa.settlingAnswer`), both for the same reason: question ids are the reviewer's own and unique only by accident, so a re-used `q1` used to arrive pre-answered (no park, question discarded) and used to overwrite an earlier run's settled decision. The binding comes from the writer - the daemon stamps the ordinal at append time and is the only writer of `answers.ndjson` - rather than from comparing timestamps, because the two files are appended independently and `asked_at`/`answered_at` are optional; an unstamped answer (an id nobody asked) settles nothing ever, so it fails toward OPEN. A correction to the same ask still replaces. Regressions: `TestLoadSupersedingQuestionReopensAnAnsweredEntry`, `TestLoadReAskAfterRetractionComesBackOpen`, `TestReviewAnswersAreKeyedByBranchAndSurviveANewRun`, `TestReviewAnswersAreKeyedPerAskWithinOneRun`, `TestSettledAsksKeepEveryDecisionForAReusedID`, `TestSettledAsksTreatASurplusAnswerAsACorrection`, `TestSettledAsksLeaveAReAskShortOfAnAnswerOpen`.
+- An open review question is resolved by an ANSWER, never by a verdict, so EVERY automatic resolver stands aside at such a gate and they all read ONE predicate to do it: `pipeline.HasUnansweredReviewQuestion` (the JSON-string sibling of `types.HasReviewQuestion`, keyed on the category, never the `question-` ID prefix), the same carve-out shape `HasProtectedPathRefusal` has. There are two such paths, `axi --yes` in `driveRunWithReconciler` and the TUI's yolo in `maybeAutoApproveCmd`, and the carve-out first landed on only the first - which left the property true of `axi` and false of the TUI, where the question was selected as ordinary work, handed to the FIXER, and the fix_review gate then approved as already-fixed. A third path must read the same predicate rather than restate the condition. A human's explicit approve or fix is deliberately still allowed, which is why the guard is never in `respondCmd`/`RespondWithOverrides`. Regressions: `TestDriveRun_YesLeavesAnOpenReviewQuestionAwaitingAnAnswer`, `TestModel_Yolo_OpenReviewQuestionSendsNoAutomaticResponse`, `TestModel_Yolo_OrdinaryReviewFindingsAreStillFixed`.
+- The open questions are bounded on every channel they do not own (`maxReviewQuestionFindings`/`maxReviewQuestionDescription` for the findings, `maxReviewQuestionPromptEntries`/`maxReviewQuestionPromptChars` for the two prompt sections), by RUNES not bytes, for the reason `maxReviewBotCommentFindings` records: the findings payload rides the IPC event stream and one oversized frame kills the whole subscription. `reviewqa`'s own `maxLines`/`maxLineBytes` do NOT contain this - 2000 accepted lines are a bounded conversation and an unbounded findings payload. Dropping a question ROW is safe, dropping its id is not: both release paths require the conversation to have nothing open and a dropped question is never re-emitted as a row (that needs a review turn, which needs zero open), so the omission marker NAMES the omitted ids and they are answered by id like any other. The marker carries the question category (so the gate still parks and no resolver treats it as work) but not a `question-<id>` ID (so it is never itself an answerable row). Regressions: `TestOpenReviewQuestionFindingsAreBounded`, `TestReviewQuestionPromptSectionsAreBounded`.
+- An INCOMPLETE question history (`reviewqa.Conversation.QuestionsIncomplete`, set by the `maxFileBytes`/scanner cut OR a question line dropped by `maxLines`) settles nothing, makes `HandleAnswerReviewQuestion` refuse the answer by name, and makes `openReviewQuestionFindings` emit the single `review-questions-unreadable` warning IN PLACE of every `question-<id>` row, whatever remains open, naming the open ids and their count - each row would otherwise instruct an `axi answer` the daemon is guaranteed to refuse. The marker carries NO review-question category on purpose, so `ResumeApprovalGate` declines and the answer-first help in `axi_render.go`/`axi.go` is not summoned; both automatic resolvers stand aside via `pipeline.HasUnreadableReviewQuestionHistory`, the ID-keyed sibling of `HasProtectedPathRefusal`. It carries no `File`, so `dropReviewQuestionFindingsJSON` drops it from the carry-forward input alongside the review-question category - otherwise `hasUnanchoredFinding` would refuse to clear ANY selected finding for as long as the append-only history stayed incomplete. Because a dropped question line is now the same condition, `readLines` reports the cap as a bool and no ask-ordinal offset survives it. Regressions: `TestUnreadableQuestionHistoryParksEvenWithNothingOpen`, `TestUnreadableQuestionHistoryReplacesTheAnswerableRows`, `TestDriveRun_YesLeavesAnUnreadableQuestionHistoryAwaitingAHuman`, `TestModel_Yolo_UnreadableQuestionHistorySendsNoAutomaticResponse`, `TestExecutor_ReviewCarryForward_AnUnreadableHistoryDoesNotBlockVerification`, `TestLineCapDroppingAQuestionLineSettlesNothing`.
+- `RunManager.HandleAnswerReviewQuestion` releases the gate only when the answer closed a question that was OPEN before the append (snapshot-then-append); an orphan or duplicate answer is recorded and never touches the gate, or it could steal the verdict from a gate parked on ordinary ask-user findings. Regressions: `TestAnswerReviewQuestionOrphanAnswerLeavesAParkedGateAlone`, `TestAnswerReviewQuestionDuplicateAnswerLeavesAParkedGateAlone`.
+- `db.GetPreviousRunReviewRounds` + `pipeline.BindPreviousRunReviewRounds` carry the superseded run's review rounds into the run an author's own fix push started. That section carries NO fix-round provenance clause and must not characterise the authorship of those commits in either direction: the adversarial framing is only ever ADDED by `fixRoundProvenanceClause`, which returns "" when neither `sctx.Fixing` nor an uncertified range applies, so there is nothing to correct - and the selector is unfiltered by run status on purpose, so a previous run that took a fix round and COMPLETED has its range certified, leaves `UncertifiedSourceRunID` empty so `BindPreviousRunReviewRounds` does not skip it, and puts the fixer's commits inside this run's own `base..head` scope. Regression: `TestSupersededRoundsDoNotClaimTheCommitsAreTheAuthors`.
+- There is NO review round cap and none may be added (captain's ruling 2026-09-15). The question protocol section is appended LAST, after `pathInstructions` and `agent.MemoryFilesRule`, because the off-state guarantee is append-only: the on-prompt must be the off-prompt plus that section and nothing else (`TestReviewStep_ConversationOffIsTodaysReview`). It used to sit at the end of `historySection`, which upstream's later `MemoryFilesRule` then followed, inserting it mid-prompt and breaking the prefix property.
+
+
+**Disk Retention: Leftover Worktrees, Run Logs, Evidence (issue #1093)**
+
+- A run's own worktree and `<NM_HOME>/evidence/<run-id>` are already removed the instant the run finishes (`RunManager.removeRunWorktree` / `cleanupRunEvidence`). `worktreeReapPolicy` (`internal/daemon/worktree_reap.go`, config: `worktree.retention`/`worktree.max_runs`, global-only like `test.evidence`'s local-storage fields) is a safety net, not the normal path: it only ever reclaims a leftover a `git worktree remove` failure (e.g. a vendored `.git` under a large `node_modules` tree) or a since-resolved `protected_paths` refusal left behind, under the DEFAULT `<NM_HOME>/worktrees` tree only - a configured `worktree_roots` placement is the operator's own directory and is left to the startup-only `cleanupOrphanWorktrees` sweep. `reapWorktrees` reuses `defaultTreeOrphanWorktrees`/`removableOrphanWorktree`/`removeOrphanWorktree` for eligibility and the git-remove-then-`os.RemoveAll`-fallback removal, and runs after every finished run (`cleanupRunEvidence`) and again at daemon startup, so a long-lived daemon converges on the budget instead of waiting for a restart.
+- `<NM_HOME>/logs/<run-id>` (per-run step-log text, `paths.RunLogDir`) had no reaper at all before this and is bounded by `reapRunLogs` (`internal/daemon/run_log_reap.go`), reusing `test.evidence.retention`/`max_runs` rather than adding a second config surface for the same kind of per-run diagnostic artifact. `no-mistakes axi logs --run <id>` already treats a missing step log as an ordinary "not recorded" case, so reaping an old run's directory degrades the same way evidence retention already does.
+- Regressions: `internal/daemon/worktree_reap_test.go`, `internal/daemon/run_log_reap_test.go`, `internal/config/config_worktree_test.go`.
 
 ## Maintaining this file
 

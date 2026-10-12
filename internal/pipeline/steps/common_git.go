@@ -2,7 +2,10 @@ package steps
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -35,15 +38,32 @@ func resolveBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch string)
 	return git.EmptyTreeSHA
 }
 
-// resolveBranchBaseSHA returns the branch base commit relative to the default
-// branch when possible. This keeps pipeline steps scoped to the full branch,
-// not just the last pushed delta. If merge-base cannot be determined, it falls
-// back to resolveBaseSHA.
-func resolveBranchBaseSHA(ctx context.Context, workDir, fallbackBaseSHA, defaultBranch string) string {
-	if mb := mergeBaseWithDefaultBranch(ctx, workDir, defaultBranch); mb != "" {
-		return mb
+// resolveBranchBaseSHA returns the branch base commit relative to the supplied
+// effective PR base branch when possible. This keeps pipeline steps scoped to
+// the full branch, not just the last pushed delta. Outside eval replay, it fetches
+// that branch's current remote tip first (as resolveRunDefaultBranchTip does).
+// The merge-base is computed against the live base, not whatever origin/<base>
+// happened to be sitting at in the worktree - a stale local ref otherwise
+// drafts PR content (and other consumers) against an outdated base and pulls
+// in unrelated commits that already landed there.
+//
+// A fetch failure is refused rather than degraded: falling back to the
+// worktree's cached origin/<base> ref on fetch failure would silently
+// reintroduce the exact stale-base bug this helper exists to eliminate, one
+// layer down. Callers return the error, which fails the step instead of
+// validating or drafting content against unverified base state.
+func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) (string, error) {
+	// Eval replay has no upstream to fetch: it pins origin/<base> to the
+	// captured commit in its isolated worktree, which is the base to use.
+	if strings.TrimSpace(defaultBranch) != "" && !sctx.EvalReplay {
+		if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
+			return "", fmt.Errorf("fetch default branch %q to resolve branch base: %w", defaultBranch, err)
+		}
 	}
-	return resolveBaseSHA(ctx, workDir, fallbackBaseSHA, defaultBranch)
+	if mb := mergeBaseWithDefaultBranch(ctx, sctx.WorkDir, defaultBranch); mb != "" {
+		return mb, nil
+	}
+	return resolveBaseSHA(ctx, sctx.WorkDir, fallbackBaseSHA, defaultBranch), nil
 }
 
 func resolveDefaultBranchTipSHA(ctx context.Context, workDir, upstreamURL, fallbackBaseSHA, defaultBranch string) string {
@@ -173,7 +193,33 @@ func resolveUpstreamURL(sctx *pipeline.StepContext) string {
 	return sctx.Repo.UpstreamURL
 }
 
+// fetchUpstreamTimeout bounds a single upstream fetch. Abort convergence alone
+// does not rescue a fetch that hangs with nothing to cancel it: an SSH fetch can
+// sit indefinitely on a dead connection while the run context stays live. The
+// deadline is attributed with ErrFetchTimeout so the caller can say why it gave
+// up rather than logging a bare context error.
+// Overridable so tests can drive the deadline without waiting it out.
+var fetchUpstreamTimeout = 120 * time.Second
+
+// ErrFetchTimeout marks a fetch that exceeded fetchUpstreamTimeout.
+var ErrFetchTimeout = errors.New("upstream fetch timed out")
+
 func fetchRunUpstreamBranch(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
+	// Respect a deadline the caller already set rather than extending it.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, fetchUpstreamTimeout, ErrFetchTimeout)
+		defer cancel()
+	}
+
+	err := fetchRunUpstreamBranchInner(ctx, sctx, branch)
+	if err != nil && errors.Is(context.Cause(ctx), ErrFetchTimeout) {
+		return fmt.Errorf("%w after %s: %v", ErrFetchTimeout, fetchUpstreamTimeout, err)
+	}
+	return err
+}
+
+func fetchRunUpstreamBranchInner(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
 	upstreamURL := resolveUpstreamURL(sctx)
 	originURL, err := git.GetRemoteURL(ctx, sctx.WorkDir, "origin")
 	if err == nil && upstreamURL == originURL {
