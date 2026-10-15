@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -148,5 +150,94 @@ func TestNeutralizesGateInstructions_HonestOnEffectiveOverride(t *testing.T) {
 	}
 	if !NeutralizesGateInstructions(optOutAgent(t, types.AgentPi, []string{"-nc"})) {
 		t.Error("pi with an explicit -nc must stay neutralized")
+	}
+}
+
+// neutralizeStubAgent is a minimal Agent whose name and gate-neutralization
+// capability are set directly, so FilterGateNeutralizing and
+// ErrGateNeutralizationRefused can be tested without depending on any real
+// adapter's knob.
+type neutralizeStubAgent struct {
+	name        string
+	neutralizes bool
+}
+
+func (a *neutralizeStubAgent) Name() string { return a.name }
+
+func (a *neutralizeStubAgent) Run(context.Context, RunOpts) (*Result, error) {
+	return nil, errors.New("neutralizeStubAgent.Run not implemented")
+}
+
+func (a *neutralizeStubAgent) Close() error { return nil }
+
+func (a *neutralizeStubAgent) NeutralizesGateInstructions() bool { return a.neutralizes }
+
+// TestFilterGateNeutralizing_MixedListKeepsOnlyNeutralizingMembers proves a
+// mixed fallback candidate list is split per member: neutralizing members
+// survive into the fallback, the rest are refused individually rather than
+// voiding the whole list. This is the fix for the defect where a fallback
+// wrapper's NeutralizesGateInstructions failed closed over ALL members.
+func TestFilterGateNeutralizing_MixedListKeepsOnlyNeutralizingMembers(t *testing.T) {
+	pi := &neutralizeStubAgent{name: "pi", neutralizes: true}
+	claude := &neutralizeStubAgent{name: "claude", neutralizes: true}
+	codex := &neutralizeStubAgent{name: "codex", neutralizes: true}
+	antigravity := &neutralizeStubAgent{name: "antigravity", neutralizes: false}
+
+	neutralized, refused := FilterGateNeutralizing([]Agent{pi, claude, codex, antigravity})
+	if len(neutralized) != 3 || len(refused) != 1 {
+		t.Fatalf("got %d neutralized, %d refused; want 3 neutralized, 1 refused", len(neutralized), len(refused))
+	}
+	if refused[0].Name() != "antigravity" {
+		t.Errorf("refused member = %q, want antigravity", refused[0].Name())
+	}
+	if fb := NewFallback(neutralized); !NeutralizesGateInstructions(fb) {
+		t.Error("a fallback built from the filtered (all-neutralizing) slice must report neutralized")
+	}
+}
+
+// TestFilterGateNeutralizing_AllUnverifiedRefusesNone proves an
+// all-unverified candidate list yields zero neutralizing members - the
+// signal callers use to still refuse the run when nothing survives the
+// filter, preserving the fail-closed guarantee.
+func TestFilterGateNeutralizing_AllUnverifiedRefusesNone(t *testing.T) {
+	opencode := &neutralizeStubAgent{name: "opencode", neutralizes: false}
+	copilot := &neutralizeStubAgent{name: "copilot", neutralizes: false}
+
+	neutralized, refused := FilterGateNeutralizing([]Agent{opencode, copilot})
+	if len(neutralized) != 0 || len(refused) != 2 {
+		t.Fatalf("got %d neutralized, %d refused; want 0 neutralized, 2 refused", len(neutralized), len(refused))
+	}
+}
+
+// TestErrGateNeutralizationRefused_NamesActualMembersNotFallbackFirst proves
+// the refusal error names every non-neutralizing member directly from the
+// refused slice, never a fallback wrapper's Name() (which forwards to
+// members[0] regardless of which member actually lacks the knob). This is
+// the exact misdirection the fix removes: a perfectly valid agent like "pi"
+// could be named as the refusal reason while the real culprit was a
+// different, later member.
+func TestErrGateNeutralizationRefused_NamesActualMembersNotFallbackFirst(t *testing.T) {
+	pi := &neutralizeStubAgent{name: "pi", neutralizes: true}
+	antigravity := &neutralizeStubAgent{name: "antigravity", neutralizes: false}
+
+	// Mirror the reported defect's ordering: pi is members[0], so the old
+	// buggy path (EnsureGateNeutralized called on the unfiltered fallback)
+	// would have named "pi" via fallbackAgent.Name(). Confirm that identity
+	// first so the assertions below are meaningful.
+	buggyFallback := NewFallback([]Agent{pi, antigravity})
+	if buggyFallback.Name() != "pi" {
+		t.Fatalf("setup invariant broken: fallback.Name() = %q, want pi", buggyFallback.Name())
+	}
+
+	_, refused := FilterGateNeutralizing([]Agent{pi, antigravity})
+	err := ErrGateNeutralizationRefused(refused)
+	if err == nil {
+		t.Fatal("expected a refusal error")
+	}
+	if !strings.HasPrefix(err.Error(), "antigravity ") {
+		t.Errorf("refusal error must lead with the actual non-neutralizing member antigravity, never the fallback's first member, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "antigravity") {
+		t.Errorf("refusal error must name the actual non-neutralizing member antigravity, got: %v", err)
 	}
 }

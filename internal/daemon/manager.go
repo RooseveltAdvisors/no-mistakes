@@ -270,17 +270,36 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		}
 		created = append(created, agent.WithSteering(next, evidenceRoot))
 	}
-	ag := agent.NewFallback(created)
-	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an
-	// unverified harness when the repo disabled project settings; otherwise run
-	// every adapter as before.
+	// Fail closed ONLY under the trusted opt-out (see startRun): filter to
+	// members with a verified gate-neutralization knob before building the
+	// fallback and before any launch decision, and refuse only when none
+	// remain. Outside the opt-out, every adapter runs exactly as before.
 	if cfg.DisableProjectSettings {
-		if err := agent.EnsureGateNeutralized(ag); err != nil {
-			_ = ag.Close()
-			return nil, err
+		neutralized, refused := agent.FilterGateNeutralizing(created)
+		if len(refused) > 0 {
+			slog.Warn("gate agent candidate(s) do not neutralize project agent-instruction files under disable_project_settings", "refused", refusedAgentNames(refused))
 		}
+		if len(neutralized) == 0 {
+			for _, existing := range created {
+				_ = existing.Close()
+			}
+			return nil, agent.ErrGateNeutralizationRefused(refused)
+		}
+		cfg.Agent = types.AgentName(neutralized[0].Name())
+		for _, existing := range refused {
+			_ = existing.Close()
+		}
+		created = neutralized
 	}
-	return ag, nil
+	return agent.NewFallback(created), nil
+}
+
+func refusedAgentNames(refused []agent.Agent) string {
+	names := make([]string, 0, len(refused))
+	for _, a := range refused {
+		names = append(names, a.Name())
+	}
+	return strings.Join(names, ", ")
 }
 
 func resolveGitPath(workDir, value string) string {
@@ -969,19 +988,34 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			// /Applications), which triggers macOS App Management prompts.
 			created = append(created, agent.WithSteering(next, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot)))
 		}
-		ag = agent.NewFallback(created)
 		// Fail closed ONLY under the trusted opt-out: when the repo asked to
-		// disable project settings, refuse any resolved harness that lacks a
-		// verified suppression knob rather than launch it with the target repo's
-		// project instructions loaded. When the repo did not opt out, every
-		// adapter runs exactly as before (backward-compat).
+		// disable project settings, filter to members with a verified
+		// suppression knob before building the fallback and before any launch
+		// decision, and refuse only when none remain, rather than launch an
+		// unverified harness with the target repo's project instructions
+		// loaded. When the repo did not opt out, every adapter runs exactly as
+		// before (backward-compat).
 		if cfg.DisableProjectSettings {
-			if err := agent.EnsureGateNeutralized(ag); err != nil {
+			neutralized, refused := agent.FilterGateNeutralizing(created)
+			if len(refused) > 0 {
+				slog.Warn("gate agent candidate(s) do not neutralize project agent-instruction files under disable_project_settings", "run_id", run.ID, "refused", refusedAgentNames(refused))
+			}
+			if len(neutralized) == 0 {
+				err := agent.ErrGateNeutralizationRefused(refused)
 				m.db.UpdateRunError(run.ID, err.Error())
 				trackStartFailure("gate_not_neutralized")
+				for _, existing := range created {
+					_ = existing.Close()
+				}
 				return "", err
 			}
+			cfg.Agent = types.AgentName(neutralized[0].Name())
+			for _, existing := range refused {
+				_ = existing.Close()
+			}
+			created = neutralized
 		}
+		ag = agent.NewFallback(created)
 	}
 
 	execSteps := m.steps()

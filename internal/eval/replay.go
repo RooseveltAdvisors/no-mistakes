@@ -260,6 +260,14 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		evaluation.CompletedAt = time.Now().Unix()
 		return evaluation
 	}
+	if cfg.DisableProjectSettings {
+		if gateErr := agent.EnsureGateNeutralized(baseAgent); gateErr != nil {
+			_ = baseAgent.Close()
+			evaluation.Error = safeurl.RedactText(gateErr.Error())
+			evaluation.CompletedAt = time.Now().Unix()
+			return evaluation
+		}
+	}
 	defer baseAgent.Close()
 	observed := &observedAgent{inner: agent.WithSteering(baseAgent, isolatedPaths.EvidenceDir()), ownership: ownership}
 

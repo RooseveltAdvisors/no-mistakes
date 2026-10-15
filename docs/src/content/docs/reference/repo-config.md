@@ -111,6 +111,7 @@ agent: [codex, claude]
 ```
 
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
+A trusted [`disable_project_settings`](#disable_project_settings) opt-in filters the candidates again before launch, so the primary is the first entry that survives both filters.
 After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
@@ -142,8 +143,8 @@ When enabled, no-mistakes suppresses the target checkout's project settings for 
 Codex, Claude, and Pi are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, and Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling).
 The setting applies to both new and resumed sessions.
 
-The gate fails before launching an agent if any resolved agent or fallback lacks a verified suppression mechanism.
-It also fails if `agent_args_override` defeats suppression, such as a nonzero Codex `project_doc_max_bytes` or Claude setting sources that include `project` or `local`.
+The gate filters the resolved agent and fallback candidates to those with a verified suppression mechanism, closes the others, and launches only the survivors.
+It fails before launching anything only when no candidate remains, for example when `agent_args_override` defeats suppression everywhere, such as a nonzero Codex `project_doc_max_bytes` or Claude setting sources that include `project` or `local`.
 When this option is `false`, missing, or `null`, all agents retain their existing project-setting behavior.
 
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.

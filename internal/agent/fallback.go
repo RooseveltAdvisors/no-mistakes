@@ -56,8 +56,10 @@ func (a *fallbackAgent) ReportsAgentAttempts() bool { return true }
 // NeutralizesGateInstructions fails closed over the whole fallback set: the
 // wrapper may invoke any member, so it neutralizes the target repo's project
 // agent-instruction files only if EVERY member does. A single unverified member
-// makes the wrapper report false so the gate is refused rather than risk that
-// member running unneutralized.
+// makes the wrapper report false rather than risk that member running
+// unneutralized; under the disable_project_settings opt-out the launch sites
+// filter candidates with FilterGateNeutralizing before this wrapper is built
+// (see agent.go), so this method is not the launch gate's control path.
 func (a *fallbackAgent) NeutralizesGateInstructions() bool {
 	if len(a.agents) == 0 {
 		return false

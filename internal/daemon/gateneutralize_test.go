@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -78,17 +80,104 @@ func TestNewPipelineAgent_OptOut_RefusesDefeatedKnob(t *testing.T) {
 	}
 }
 
-// TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember proves an
-// ordered fallback list fails closed under opt-out if any member is unverified.
-func TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember(t *testing.T) {
-	cfg := &config.Config{Agents: []types.AgentName{types.AgentCodex, types.AgentOpenCode}, DisableProjectSettings: true}
-	if _, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath); err == nil {
-		t.Fatal("a fallback list containing an unverified harness must be refused under opt-out")
-	}
-	cfg = &config.Config{Agents: []types.AgentName{types.AgentCodex, types.AgentClaude}, DisableProjectSettings: true}
+// TestNewPipelineAgent_OptOut_FallbackOfOnlyVerifiedMembersRuns proves an
+// ordered fallback list of exclusively verified harnesses passes under
+// opt-out.
+func TestNewPipelineAgent_OptOut_FallbackOfOnlyVerifiedMembersRuns(t *testing.T) {
+	cfg := &config.Config{Agents: []types.AgentName{types.AgentCodex, types.AgentClaude}, DisableProjectSettings: true}
 	if ag, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath); err != nil {
 		t.Fatalf("a fallback list of only verified harnesses must pass under opt-out, got: %v", err)
 	} else {
 		_ = ag.Close()
+	}
+}
+
+// TestNewPipelineAgent_OptOut_MixedFallbackRunsFilteringUnverifiedMembers is
+// the regression test for the gate-fallback filter defect: a fallback list
+// containing a non-neutralizing member (opencode, alongside pi/claude/codex)
+// must still run under opt-out, with the unverified member filtered out
+// rather than voiding the whole run. Before the fix, EnsureGateNeutralized
+// was called on the already-built fallback wrapper, whose
+// NeutralizesGateInstructions fails closed over the WHOLE member set - a
+// single unverified member refused every member, including the verified
+// ones.
+func TestNewPipelineAgent_OptOut_MixedFallbackRunsFilteringUnverifiedMembers(t *testing.T) {
+	var logOut bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logOut, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	cfg := &config.Config{
+		Agents:                 []types.AgentName{types.AgentPi, types.AgentClaude, types.AgentCodex, types.AgentOpenCode},
+		DisableProjectSettings: true,
+	}
+	ag, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath)
+	if err != nil {
+		t.Fatalf("a mixed fallback list must still run under opt-out by filtering the unverified member, got: %v", err)
+	}
+	defer func() { _ = ag.Close() }()
+	if !agent.NeutralizesGateInstructions(ag) {
+		t.Error("the filtered fallback must report neutralized")
+	}
+	if out := logOut.String(); !strings.Contains(out, "gate agent candidate(s) do not neutralize") || !strings.Contains(out, string(types.AgentOpenCode)) {
+		t.Errorf("dropping a configured member must warn and name it, got log: %s", out)
+	}
+}
+
+// TestNewPipelineAgent_OptOut_AgentLabelReflectsSurvivingPrimary proves the
+// config's primary agent label is reassigned to the first surviving member
+// after filtering: with [opencode, codex] under the opt-out, opencode never
+// runs, so cfg.Agent must name codex - the value every run telemetry event
+// reports - not the filtered-out resolved[0].
+func TestNewPipelineAgent_OptOut_AgentLabelReflectsSurvivingPrimary(t *testing.T) {
+	cfg := &config.Config{
+		Agents:                 []types.AgentName{types.AgentOpenCode, types.AgentCodex},
+		DisableProjectSettings: true,
+	}
+	ag, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath)
+	if err != nil {
+		t.Fatalf("a mixed fallback list must still run under opt-out, got: %v", err)
+	}
+	defer func() { _ = ag.Close() }()
+	if cfg.Agent != types.AgentCodex {
+		t.Errorf("cfg.Agent = %q, want the surviving primary %q, not the filtered-out first member", cfg.Agent, types.AgentCodex)
+	}
+	if !agent.NeutralizesGateInstructions(ag) {
+		t.Error("the filtered fallback must report neutralized")
+	}
+}
+
+// TestNewPipelineAgent_OptOut_AllUnverifiedFallbackRefuses proves the
+// fail-closed property holds absolutely: when NO member of the fallback list
+// has a verified knob, the run is still refused rather than launched with any
+// of them.
+func TestNewPipelineAgent_OptOut_AllUnverifiedFallbackRefuses(t *testing.T) {
+	cfg := &config.Config{
+		Agents:                 []types.AgentName{types.AgentOpenCode, types.AgentCopilot},
+		DisableProjectSettings: true,
+	}
+	if _, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath); err == nil {
+		t.Fatal("an all-unverified fallback list must be refused under opt-out")
+	}
+}
+
+// TestNewPipelineAgent_OptOut_RefusalNamesActualUnverifiedMembers proves the
+// refusal error names the non-neutralizing members themselves, not a fallback
+// wrapper's first member. fallbackAgent.Name() forwards to members[0]
+// regardless of which member actually lacks the knob, which is exactly the
+// misdirection reported against the defect (the error named "pi", a
+// perfectly valid agent, while the actual non-neutralizing member was later
+// in the list).
+func TestNewPipelineAgent_OptOut_RefusalNamesActualUnverifiedMembers(t *testing.T) {
+	cfg := &config.Config{
+		Agents:                 []types.AgentName{types.AgentOpenCode, types.AgentCopilot},
+		DisableProjectSettings: true,
+	}
+	_, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath)
+	if err == nil {
+		t.Fatal("expected a refusal error")
+	}
+	if !strings.Contains(err.Error(), string(types.AgentOpenCode)) || !strings.Contains(err.Error(), string(types.AgentCopilot)) {
+		t.Errorf("refusal error should name every non-neutralizing member, got: %v", err)
 	}
 }

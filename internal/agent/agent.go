@@ -157,9 +157,14 @@ func NeutralizesGateInstructions(a Agent) bool {
 
 // EnsureGateNeutralized fails closed when the agent that will run gate steps in
 // the target checkout does not neutralize that checkout's project
-// agent-instruction files. Callers must invoke it before launching any gate
-// agent so an unverified harness is refused with a clear error rather than run
-// unneutralized in the target checkout. Only codex, claude, and pi have a verified
+// agent-instruction files, refusing it with a clear error rather than letting it
+// run unneutralized. It must never be called on an already-built fallback
+// wrapper: that wrapper fails closed over its WHOLE member set and its Name()
+// forwards to members[0], so one unverified member voids the run and the error
+// misnames the culprit. Callers holding a fallback candidate list must use
+// FilterGateNeutralizing and ErrGateNeutralizationRefused instead; this stays
+// the correct check for a single, non-fallback-wrapped agent (for example the
+// eval replay candidate). Only codex, claude, and pi have a verified
 // neutralization knob today.
 func EnsureGateNeutralized(a Agent) error {
 	if a == nil {
@@ -173,6 +178,50 @@ func EnsureGateNeutralized(a Agent) error {
 		"checkout. Only codex, claude, and pi have a verified neutralization knob (and only when it "+
 		"is not overridden by agent_args_override); set 'agent' to codex, claude, or pi in "+
 		"~/.no-mistakes/config.yaml", a.Name())
+}
+
+// FilterGateNeutralizing partitions a fallback candidate list into members
+// that individually neutralize the target repo's project agent-instruction
+// files and members that do not. Callers under the trusted opt-out must
+// filter to the neutralized slice before building the fallback and before any
+// launch decision: a fallback wrapper's NeutralizesGateInstructions fails
+// closed over its WHOLE member set, so building it from an unfiltered list
+// and only then checking would refuse a run that has a perfectly good
+// neutralizing member alongside an unverified one.
+func FilterGateNeutralizing(agents []Agent) (neutralized, refused []Agent) {
+	for _, a := range agents {
+		if NeutralizesGateInstructions(a) {
+			neutralized = append(neutralized, a)
+		} else {
+			refused = append(refused, a)
+		}
+	}
+	return neutralized, refused
+}
+
+// ErrGateNeutralizationRefused builds the refusal error for a set of
+// candidate agents that lack a verified gate-neutralization knob, naming
+// every one of them. Callers must use this instead of EnsureGateNeutralized
+// on an already-built fallback wrapper, whose error names only the wrapper's
+// first member (Name() delegates to agents[0]) even when a different member
+// is the actual reason for the refusal.
+func ErrGateNeutralizationRefused(refused []Agent) error {
+	if len(refused) == 0 {
+		return fmt.Errorf("no gate agent configured")
+	}
+	names := make([]string, 0, len(refused))
+	for _, a := range refused {
+		if a == nil {
+			names = append(names, "<nil>")
+			continue
+		}
+		names = append(names, a.Name())
+	}
+	return fmt.Errorf("%s does not neutralize the target repository's project "+
+		"agent-instruction files (AGENTS.md/CLAUDE.md); refusing to launch it in the target "+
+		"checkout. Only codex, claude, and pi have a verified neutralization knob (and only when it "+
+		"is not overridden by agent_args_override); set 'agent' to codex, claude, or pi in "+
+		"~/.no-mistakes/config.yaml", strings.Join(names, ", "))
 }
 
 // LifecycleEvent describes process-level activity for an agent invocation.
@@ -253,8 +302,9 @@ type Options struct {
 	// DisableProjectSettings, when true, asks a supported adapter (codex,
 	// claude, pi) to launch with the target repo's project-level agent
 	// settings/instructions suppressed. It is the resolved, trusted-only opt-out
-	// from config.Config; adapters without a verified suppression knob ignore it
-	// and are refused separately by EnsureGateNeutralized when the opt-out is on.
+	// from config.Config; when the opt-out is on, adapters without a verified
+	// suppression knob are filtered out and closed before launch, and the run
+	// is refused only when none remain.
 	DisableProjectSettings bool
 }
 

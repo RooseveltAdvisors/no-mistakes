@@ -97,6 +97,13 @@ After non-trivial changes: `gofmt -w .`; `make lint`; `go test -race ./...` (e2e
 - `review.path_instructions` match full changed-file set, not ignore-filtered subset. `reviewablePaths` in `common_diff.go`.
 - Regressions: `TestLoadTrustedRepoConfig_*`, `TestEffectiveRepoConfig_*`, e2e repo-config and review-path journeys.
 
+**Gate Agent Neutralization (`internal/agent/agent.go`, `internal/daemon/manager.go`, `internal/eval/replay.go`)**
+
+- Under `disable_project_settings`, filter the fallback candidate list to members with a verified `GateInstructionNeutralizer` knob (`agent.FilterGateNeutralizing`) BEFORE building `agent.NewFallback`, and refuse only when none remain (`agent.ErrGateNeutralizationRefused`, naming the actual non-neutralizing member(s)). Never call `EnsureGateNeutralized` on an already-built fallback wrapper in this path: its `NeutralizesGateInstructions` fails closed over the WHOLE member set, and its `Name()` forwards to `members[0]`, so a single unverified member anywhere in the list voids every member and any refusal misnames the culprit. The eval replay candidate launch (`internal/eval/replay.go`) is a single, non-fallback agent and calls `agent.EnsureGateNeutralized` directly under the same opt-out.
+- Only codex, claude, and pi have a verified knob today (see `agent.go` doc comments); an operator override that defeats a knob (e.g. codex `project_doc_max_bytes>0`) makes that instance report unneutralized too.
+- Both filter sites `slog.Warn` the dropped member names before closing them and relabel `cfg.Agent` to the first survivor, so run telemetry never names a filtered-out agent.
+- Regressions: `internal/agent/gateneutralize_test.go`, `internal/daemon/gateneutralize_test.go`, `internal/eval/gateneutralize_test.go`, e2e `internal/e2e/gate_neutralize_optout_test.go`.
+
 **CI Monitor Lifecycle**
 
 - `ci_timeout` idle; re-arms on default-branch tip via `timeoutAnchor` only extends. Semantics: `config.go` + `global-config.md`.
