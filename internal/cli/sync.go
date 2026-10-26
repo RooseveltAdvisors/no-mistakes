@@ -338,7 +338,10 @@ func humanSyncSummary(state branchsync.State) string {
 			return "run ended without publishing its pipeline commits; recover custody with `no-mistakes sync --recover`. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits"
 		}
 		if state.Safety == "blocked_recover_preserved_head_missing" {
-			return "run ended without a recoverable preserved head; recover custody with `no-mistakes sync --recover --keep-local` to keep the current local head"
+			return state.Error + "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"
+		}
+		if state.Safety == "blocked_recover_manual_reconciliation" {
+			return state.Error + "; do not make local follow-up commits"
 		}
 		return "pipeline fix is not pushed yet; do not make local follow-up commits"
 	case branchsync.StateCustodyReturned:

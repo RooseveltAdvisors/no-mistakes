@@ -1504,6 +1504,114 @@ func TestHumanSyncRecoverRequiresConfirmationOutsideTTY(t *testing.T) {
 	}
 }
 
+// TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead pins the
+// human custody summary for the stacked missing-head incident: an older
+// stranded run's head is genuinely absent from both consulted stores while the
+// reported run's head is present in the gate as an object and the branch ref.
+// The summary must name the run and head that are actually missing plus the
+// stores consulted, and must never read as the present head being the one that
+// failed. The manual-reconciliation sibling carries the same attribution.
+func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.T) {
+	f := newCLIRecoverFixture(t)
+	tree := cliGit(t, f.gate, "rev-parse", f.preserved+"^{tree}")
+	olderHead := cliGit(t, f.gate, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit-tree", tree, "-p", f.preserved, "-m", "older missing head")
+	if err := os.Remove(filepath.Join(f.gate, "objects", olderHead[:2], olderHead[2:])); err != nil {
+		t.Fatal(err)
+	}
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(f.runID, types.RunCancelled, olderHead); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	newest, err := database.InsertRun(f.repoID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(newest.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(newest.ID, types.RunFailed, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("gate branch = %s, want the present head %s", got, f.preserved)
+	}
+
+	previous := syncInteractive
+	syncInteractive = func() bool { return false }
+	t.Cleanup(func() { syncInteractive = previous })
+	out, err := executeCmd("sync", "--recover")
+	var ee *exitError
+	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
+		t.Fatalf("recover confirmation should refuse without mutating, got %#v\n%s", err, out)
+	}
+
+	summary := printedSyncSummary(out)
+	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary omits %q: %s", want, summary)
+		}
+	}
+	for _, unwanted := range []string{f.preserved, newest.ID, "without a recoverable preserved head", "not pushed yet"} {
+		if strings.Contains(summary, unwanted) {
+			t.Errorf("summary keeps the old misattribution %q: %s", unwanted, summary)
+		}
+	}
+
+	database, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unverified, err := database.InsertRun(f.repoID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(unverified.ID, strings.Repeat("e", 40)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(unverified.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err = executeCmd("sync", "--recover")
+	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
+		t.Fatalf("manual-reconciliation confirmation should refuse, got %#v\n%s", err, out)
+	}
+	summary = printedSyncSummary(out)
+	for _, want := range []string{f.runID, olderHead, f.gate} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("manual-reconciliation summary omits %q: %s", want, summary)
+		}
+	}
+	for _, unwanted := range []string{"without a recoverable preserved head", "not pushed yet"} {
+		if strings.Contains(summary, unwanted) {
+			t.Errorf("manual-reconciliation summary keeps the old misattribution %q: %s", unwanted, summary)
+		}
+	}
+}
+
+func printedSyncSummary(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "Local branch: ") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "Local branch: "))
+		}
+	}
+	return ""
+}
+
 func cliGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	out, err := git.Run(context.Background(), dir, args...)

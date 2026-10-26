@@ -161,19 +161,71 @@ func TestSyncConfirmationEscapeNeverApplies(t *testing.T) {
 	}
 }
 
+// TestMissingPreservedHeadStatusShowsKeepLocalRecoveryCommand pins the
+// missing-head panel for the stacked incident shape: an older stranded run's
+// head is missing from both stores while the reported run's head is present in
+// the gate. The panel must name the run and head actually missing plus the
+// stores consulted, show its recovery command, and never read as the present
+// head being the one that failed. The recover-refusal and manual-reconciliation
+// siblings carry the same attribution.
 func TestMissingPreservedHeadStatusShowsKeepLocalRecoveryCommand(t *testing.T) {
+	missingRun := "run-older"
+	missingHead := strings.Repeat("a", 40)
+	presentRun := "run-newest"
+	presentHead := strings.Repeat("b", 40)
 	state := branchsync.State{
 		State:  branchsync.StatePipelineOwned,
 		Safety: "blocked_recover_preserved_head_missing",
+		Pipeline: branchsync.PipelineState{
+			RunID: presentRun, Status: "failed", Phase: "pre_push", CurrentHead: presentHead,
+		},
 		NextAction: &branchsync.NextAction{
 			Code:    "recover_custody",
 			Command: "no-mistakes axi sync --recover --keep-local",
 		},
+		Error: "stranded recorded pipeline run " + missingRun + " head " + missingHead +
+			" not found in the invoking worktree /work/operator or the local gate /work/nm/repos/repo.git" +
+			"; recover custody by keeping the current local head, which discards the missing preserved commits",
 	}
 
 	view := stripANSI(renderLocalBranchStatus(&state, false, 80))
 	if !strings.Contains(view, "no-mistakes axi sync --recover --keep-local") {
 		t.Fatalf("missing-head status did not show its recovery command:\n%s", view)
+	}
+	for _, want := range []string{missingRun, missingHead, "/work/operator", "/work/nm/repos/repo.git"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("missing-head status omits %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"without a recoverable preserved head", presentHead, presentRun} {
+		if strings.Contains(view, unwanted) {
+			t.Errorf("missing-head status blames the present head or keeps the old claim %q:\n%s", unwanted, view)
+		}
+	}
+
+	state.NextAction = nil
+	view = stripANSI(renderLocalBranchStatus(&state, false, 80))
+	for _, want := range []string{missingRun, missingHead, "no-mistakes axi sync --recover --keep-local"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("recover-refusal status omits %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "without a recoverable preserved head") || strings.Contains(view, presentHead) || strings.Contains(view, presentRun) {
+		t.Fatalf("recover-refusal status blames the present head or keeps the old claim:\n%s", view)
+	}
+
+	state.Safety = "blocked_recover_manual_reconciliation"
+	state.Error = "a stranded run has missing, unverified, or conflicting recovery evidence (recorded pipeline run " + missingRun + " head " + missingHead + " not found in the invoking worktree /work/operator or the local gate /work/nm/repos/repo.git); inspect and reconcile the recorded and live heads manually"
+	view = stripANSI(renderLocalBranchStatus(&state, false, 80))
+	for _, want := range []string{missingRun, missingHead, "/work/operator", "/work/nm/repos/repo.git"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("manual-reconciliation status omits %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"without a recoverable preserved head", "not pushed yet", presentHead, presentRun} {
+		if strings.Contains(view, unwanted) {
+			t.Errorf("manual-reconciliation status blames the present head or keeps the old misattribution %q:\n%s", unwanted, view)
+		}
 	}
 }
 
