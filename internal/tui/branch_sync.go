@@ -75,7 +75,7 @@ func renderLocalBranchStatus(state *branchsync.State, refreshing bool, width int
 	if width < 40 {
 		width = 80
 	}
-	return renderBoxWithFooter("Local branch", message, width, footer)
+	return renderBoxWithFooter("Local branch", strings.Join(wrapText(message, width-4), "\n"), width, footer)
 }
 
 func trackTUISyncAttempt(mode string, state branchsync.State, result string, started time.Time) {
