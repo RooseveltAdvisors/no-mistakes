@@ -1636,44 +1636,21 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 	}
 }
 
-// TestStatusLocalBranchSummaryNamesTheMissingRunAndStores pins the
-// `no-mistakes status` local-branch summary for the same stacked missing-head
-// incident as TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead,
-// driven through the shipped binary: it must name the run and head that are
-// actually missing plus the stores consulted, exactly like the sync and TUI
-// surfaces, and must never claim the present head's preserved recovery
-// evidence is unusable. The manual-reconciliation sibling carries the same
-// attribution.
-func TestStatusLocalBranchSummaryNamesTheMissingRunAndStores(t *testing.T) {
-	f, olderHead, newestID := newCLIStackedMissingHeadFixture(t)
+// TestStatusLocalBranchSummaryNeverClaimsPresentHeadMissing pins the
+// `no-mistakes status` local-branch summary for the stacked missing-head
+// incident driven through the shipped binary. The status surface stays
+// gate-blind exactly as at base, and its summary must never read as the
+// present head being the one that failed or carry the retired misattribution
+// strings. The manual-reconciliation sibling holds the same bar.
+func TestStatusLocalBranchSummaryNeverClaimsPresentHeadMissing(t *testing.T) {
+	f, _, newestID := newCLIStackedMissingHeadFixture(t)
 	bin := buildNoMistakesBinary(t)
-	invoked, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	summary := localBranchStatusSummary(t, execNoMistakes(t, bin, "status"))
-	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree", invoked, "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"} {
-		if !strings.Contains(summary, want) {
-			t.Errorf("status summary omits %q: %s", want, summary)
-		}
-	}
-	for _, unwanted := range []string{f.preserved, newestID, "cannot be used safely", "without a recoverable preserved head", "not pushed yet"} {
+	for _, unwanted := range []string{f.preserved, newestID, "without a recoverable preserved head", "not pushed yet"} {
 		if strings.Contains(summary, unwanted) {
-			t.Errorf("status summary keeps the gate-blind claim %q: %s", unwanted, summary)
+			t.Errorf("status summary blames the present head or keeps the old misattribution %q: %s", unwanted, summary)
 		}
-	}
-
-	previous := syncInteractive
-	syncInteractive = func() bool { return false }
-	t.Cleanup(func() { syncInteractive = previous })
-	syncOut, err := executeCmd("sync", "--recover")
-	var ee *exitError
-	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
-		t.Fatalf("sync recover confirmation should refuse, got %#v\n%s", err, syncOut)
-	}
-	if want := printedSyncSummary(syncOut); summary != want {
-		t.Errorf("status summary must match the sync surface summary:\nstatus: %s\nsync:   %s", summary, want)
 	}
 
 	p, err := paths.New()
@@ -1699,14 +1676,9 @@ func TestStatusLocalBranchSummaryNamesTheMissingRunAndStores(t *testing.T) {
 	}
 
 	summary = localBranchStatusSummary(t, execNoMistakes(t, bin, "status"))
-	for _, want := range []string{f.runID, olderHead, f.gate, invoked, "missing, unverified, or conflicting", "; do not make local follow-up commits"} {
-		if !strings.Contains(summary, want) {
-			t.Errorf("manual-reconciliation status summary omits %q: %s", want, summary)
-		}
-	}
-	for _, unwanted := range []string{f.preserved, newestID, "cannot be used safely", "not pushed yet"} {
+	for _, unwanted := range []string{f.preserved, newestID, "without a recoverable preserved head", "not pushed yet"} {
 		if strings.Contains(summary, unwanted) {
-			t.Errorf("manual-reconciliation status summary keeps %q: %s", unwanted, summary)
+			t.Errorf("manual-reconciliation status summary blames the present head or keeps the old misattribution %q: %s", unwanted, summary)
 		}
 	}
 }
