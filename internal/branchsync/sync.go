@@ -1894,8 +1894,12 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 // were consulted, so a custody report never implies that a present head, such
 // as the reported run's own, is the one that failed.
 func (s *Service) missingHeadDetail(missingHeads []string) string {
+	worktree := s.workDir()
+	if abs, err := filepath.Abs(worktree); err == nil {
+		worktree = abs
+	}
 	return fmt.Sprintf("recorded pipeline %s not found in the invoking worktree %s or the local gate %s",
-		strings.Join(missingHeads, ", "), s.workDir(), strings.TrimSpace(s.GateDir))
+		strings.Join(missingHeads, ", "), worktree, strings.TrimSpace(s.GateDir))
 }
 
 func unavailableRecoverySource(safety, message string) recoverySourceProof {

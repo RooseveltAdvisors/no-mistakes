@@ -1558,6 +1558,10 @@ func newCLIStackedMissingHeadFixture(t *testing.T) (f cliRecoverFixture, olderHe
 // failed. The manual-reconciliation sibling carries the same attribution.
 func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.T) {
 	f, olderHead, newestID := newCLIStackedMissingHeadFixture(t)
+	invoked, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	previous := syncInteractive
 	syncInteractive = func() bool { return false }
@@ -1569,7 +1573,7 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 	}
 
 	summary := printedSyncSummary(out)
-	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree", "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"} {
+	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree", invoked, "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("summary omits %q: %s", want, summary)
 		}
@@ -1607,7 +1611,7 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 		t.Fatalf("manual-reconciliation confirmation should refuse, got %#v\n%s", err, out)
 	}
 	summary = printedSyncSummary(out)
-	for _, want := range []string{f.runID, olderHead, f.gate, "; do not make local follow-up commits", "missing, unverified, or conflicting"} {
+	for _, want := range []string{f.runID, olderHead, f.gate, invoked, "; do not make local follow-up commits", "missing, unverified, or conflicting"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("manual-reconciliation summary omits %q: %s", want, summary)
 		}
@@ -1622,7 +1626,7 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
 		t.Fatalf("keep-local recovery should refuse on mixed evidence, got %#v\n%s", err, out)
 	}
-	for _, want := range []string{"has missing, unverified, or conflicting recovery evidence", f.runID, olderHead, f.gate} {
+	for _, want := range []string{"has missing, unverified, or conflicting recovery evidence", f.runID, olderHead, f.gate, invoked} {
 		if !strings.Contains(out, want) {
 			t.Errorf("keep-local refusal omits %q:\n%s", want, out)
 		}
@@ -1643,9 +1647,13 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 func TestStatusLocalBranchSummaryNamesTheMissingRunAndStores(t *testing.T) {
 	f, olderHead, newestID := newCLIStackedMissingHeadFixture(t)
 	bin := buildNoMistakesBinary(t)
+	invoked, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	summary := localBranchStatusSummary(t, execNoMistakes(t, bin, "status"))
-	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree", "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"} {
+	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree", invoked, "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("status summary omits %q: %s", want, summary)
 		}
@@ -1691,7 +1699,7 @@ func TestStatusLocalBranchSummaryNamesTheMissingRunAndStores(t *testing.T) {
 	}
 
 	summary = localBranchStatusSummary(t, execNoMistakes(t, bin, "status"))
-	for _, want := range []string{f.runID, olderHead, f.gate, "missing, unverified, or conflicting", "; do not make local follow-up commits"} {
+	for _, want := range []string{f.runID, olderHead, f.gate, invoked, "missing, unverified, or conflicting", "; do not make local follow-up commits"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("manual-reconciliation status summary omits %q: %s", want, summary)
 		}
