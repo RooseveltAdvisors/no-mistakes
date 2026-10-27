@@ -55,7 +55,10 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("check active run: %w", err)
 			}
-			if syncState := (&branchsync.Service{DB: d, Repo: repo, WorkDir: "."}).InspectCached(cmd.Context()); relevantCachedSyncState(syncState) {
+			// The service must see the local gate exactly like openSyncService
+			// and inspectAxiBranchSync, or missing-head custody evidence is
+			// invisible here and the summary blames the wrong head.
+			if syncState := (&branchsync.Service{DB: d, Repo: repo, WorkDir: ".", GateDir: p.RepoDir(repo.ID), Paths: p}).InspectCached(cmd.Context()); relevantCachedSyncState(syncState) {
 				fmt.Fprintf(w, "\n  %s  %s\n", sDim.Render("local branch:"), humanSyncSummary(syncState))
 			}
 			if activeRun != nil {

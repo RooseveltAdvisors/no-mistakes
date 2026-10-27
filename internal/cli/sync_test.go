@@ -1504,17 +1504,16 @@ func TestHumanSyncRecoverRequiresConfirmationOutsideTTY(t *testing.T) {
 	}
 }
 
-// TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead pins the
-// human custody summary for the stacked missing-head incident: an older
-// stranded run's head is genuinely absent from both consulted stores while the
-// reported run's head is present in the gate as an object and the branch ref.
-// The summary must name the run and head that are actually missing plus the
-// stores consulted, and must never read as the present head being the one that
-// failed. The manual-reconciliation sibling carries the same attribution.
-func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.T) {
-	f := newCLIRecoverFixture(t)
+// newCLIStackedMissingHeadFixture builds the pinned stacked missing-head
+// incident on top of the standard recover fixture: the older stranded run's
+// head (olderHead) is genuinely absent from both consulted stores while the
+// newer run's head (newestID, f.preserved) is present in the gate as an
+// object and the branch ref.
+func newCLIStackedMissingHeadFixture(t *testing.T) (f cliRecoverFixture, olderHead, newestID string) {
+	t.Helper()
+	f = newCLIRecoverFixture(t)
 	tree := cliGit(t, f.gate, "rev-parse", f.preserved+"^{tree}")
-	olderHead := cliGit(t, f.gate, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit-tree", tree, "-p", f.preserved, "-m", "older missing head")
+	olderHead = cliGit(t, f.gate, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit-tree", tree, "-p", f.preserved, "-m", "older missing head")
 	if err := os.Remove(filepath.Join(f.gate, "objects", olderHead[:2], olderHead[2:])); err != nil {
 		t.Fatal(err)
 	}
@@ -1534,6 +1533,7 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	newestID = newest.ID
 	if err := database.UpdateRunHeadSHA(newest.ID, f.preserved); err != nil {
 		t.Fatal(err)
 	}
@@ -1546,6 +1546,18 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
 		t.Fatalf("gate branch = %s, want the present head %s", got, f.preserved)
 	}
+	return f, olderHead, newestID
+}
+
+// TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead pins the
+// human custody summary for the stacked missing-head incident: an older
+// stranded run's head is genuinely absent from both consulted stores while the
+// reported run's head is present in the gate as an object and the branch ref.
+// The summary must name the run and head that are actually missing plus the
+// stores consulted, and must never read as the present head being the one that
+// failed. The manual-reconciliation sibling carries the same attribution.
+func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.T) {
+	f, olderHead, newestID := newCLIStackedMissingHeadFixture(t)
 
 	previous := syncInteractive
 	syncInteractive = func() bool { return false }
@@ -1562,13 +1574,17 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 			t.Errorf("summary omits %q: %s", want, summary)
 		}
 	}
-	for _, unwanted := range []string{f.preserved, newest.ID, "without a recoverable preserved head", "not pushed yet"} {
+	for _, unwanted := range []string{f.preserved, newestID, "without a recoverable preserved head", "not pushed yet"} {
 		if strings.Contains(summary, unwanted) {
 			t.Errorf("summary keeps the old misattribution %q: %s", unwanted, summary)
 		}
 	}
 
-	database, err = db.Open(p.DB())
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1614,6 +1630,90 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 	if strings.Contains(out, "has unverified or conflicting recovery evidence") {
 		t.Fatalf("keep-local refusal mislabels the missing head as unverified or conflicting:\n%s", out)
 	}
+}
+
+// TestStatusLocalBranchSummaryNamesTheMissingRunAndStores pins the
+// `no-mistakes status` local-branch summary for the same stacked missing-head
+// incident as TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead,
+// driven through the shipped binary: it must name the run and head that are
+// actually missing plus the stores consulted, exactly like the sync and TUI
+// surfaces, and must never claim the present head's preserved recovery
+// evidence is unusable. The manual-reconciliation sibling carries the same
+// attribution.
+func TestStatusLocalBranchSummaryNamesTheMissingRunAndStores(t *testing.T) {
+	f, olderHead, newestID := newCLIStackedMissingHeadFixture(t)
+	bin := buildNoMistakesBinary(t)
+
+	summary := localBranchStatusSummary(t, execNoMistakes(t, bin, "status"))
+	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree", "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("status summary omits %q: %s", want, summary)
+		}
+	}
+	for _, unwanted := range []string{f.preserved, newestID, "cannot be used safely", "without a recoverable preserved head", "not pushed yet"} {
+		if strings.Contains(summary, unwanted) {
+			t.Errorf("status summary keeps the gate-blind claim %q: %s", unwanted, summary)
+		}
+	}
+
+	previous := syncInteractive
+	syncInteractive = func() bool { return false }
+	t.Cleanup(func() { syncInteractive = previous })
+	syncOut, err := executeCmd("sync", "--recover")
+	var ee *exitError
+	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
+		t.Fatalf("sync recover confirmation should refuse, got %#v\n%s", err, syncOut)
+	}
+	if want := printedSyncSummary(syncOut); summary != want {
+		t.Errorf("status summary must match the sync surface summary:\nstatus: %s\nsync:   %s", summary, want)
+	}
+
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unverified, err := database.InsertRun(f.repoID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(unverified.ID, strings.Repeat("e", 40)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(unverified.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	summary = localBranchStatusSummary(t, execNoMistakes(t, bin, "status"))
+	for _, want := range []string{f.runID, olderHead, f.gate, "missing, unverified, or conflicting", "; do not make local follow-up commits"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("manual-reconciliation status summary omits %q: %s", want, summary)
+		}
+	}
+	for _, unwanted := range []string{f.preserved, newestID, "cannot be used safely", "not pushed yet"} {
+		if strings.Contains(summary, unwanted) {
+			t.Errorf("manual-reconciliation status summary keeps %q: %s", unwanted, summary)
+		}
+	}
+}
+
+// localBranchStatusSummary extracts the `no-mistakes status` local-branch
+// custody summary line, which carries the rendered label styling.
+func localBranchStatusSummary(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(ansiEscape.ReplaceAllString(out, ""), "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "local branch:") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "local branch:"))
+		}
+	}
+	t.Fatalf("status output has no local branch summary:\n%s", out)
+	return ""
 }
 
 func printedSyncSummary(out string) string {
