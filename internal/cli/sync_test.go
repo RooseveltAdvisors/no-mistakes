@@ -1591,7 +1591,7 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 		t.Fatalf("manual-reconciliation confirmation should refuse, got %#v\n%s", err, out)
 	}
 	summary = printedSyncSummary(out)
-	for _, want := range []string{f.runID, olderHead, f.gate, "; do not make local follow-up commits"} {
+	for _, want := range []string{f.runID, olderHead, f.gate, "; do not make local follow-up commits", "missing, unverified, or conflicting"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("manual-reconciliation summary omits %q: %s", want, summary)
 		}
@@ -1600,6 +1600,19 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 		if strings.Contains(summary, unwanted) {
 			t.Errorf("manual-reconciliation summary keeps the old misattribution %q: %s", unwanted, summary)
 		}
+	}
+
+	out, err = executeCmd("sync", "--recover", "--keep-local", "--yes")
+	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
+		t.Fatalf("keep-local recovery should refuse on mixed evidence, got %#v\n%s", err, out)
+	}
+	for _, want := range []string{"has missing, unverified, or conflicting recovery evidence", f.runID, olderHead, f.gate} {
+		if !strings.Contains(out, want) {
+			t.Errorf("keep-local refusal omits %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "has unverified or conflicting recovery evidence") {
+		t.Fatalf("keep-local refusal mislabels the missing head as unverified or conflicting:\n%s", out)
 	}
 }
 

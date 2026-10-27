@@ -673,7 +673,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if keepLocal {
 		runIDs, candidateHeads, anyMissing, allEligible, missingHeads := s.missingHeadKeepLocalRuns(ctx, &state, run)
 		if anyMissing && !allEligible {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_manual_reconciliation", "a stranded run has unverified or conflicting recovery evidence ("+s.missingHeadDetail(missingHeads)+"); reconcile it before returning branch custody")
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_manual_reconciliation", "a stranded run has missing, unverified, or conflicting recovery evidence ("+s.missingHeadDetail(missingHeads)+"); reconcile it before returning branch custody")
 		}
 		if anyMissing {
 			return s.recoverKeepLocalAtCurrentHead(ctx, run, state, runIDs, candidateHeads)
