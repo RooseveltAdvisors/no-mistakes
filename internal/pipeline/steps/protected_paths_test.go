@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -605,5 +606,42 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
 	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
+	}
+}
+
+// TestCommitAgentFixes_ProtectedPathRefusalParksBeforeTrailerStrip pins the
+// fix-round commit path ordering: with a protected-path edit present and no
+// fleet AI co-author trailer strip resolving, the parkable protected-path
+// refusal must surface first instead of the unrelated strip precondition
+// terminating the commit. The refusal keeps HEAD, the index, and the edit
+// untouched.
+func TestCommitAgentFixes_ProtectedPathRefusalParksBeforeTrailerStrip(t *testing.T) {
+	t.Setenv(git.TrailerStripEnvVar, "")
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.ReviewStartingHeadSHA = headSHA
+	sctx.Config.ProtectedPaths = []string{"feature.txt"}
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("unrelated residue"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback")
+	if err == nil || !strings.Contains(err.Error(), "feature.txt") {
+		t.Fatalf("expected the parkable protected-path refusal first, got %v", err)
+	}
+	if errors.Is(err, git.ErrNoTrailerStrip) {
+		t.Fatalf("the trailer-strip precondition masked the parkable refusal: %v", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD moved to %s despite the refusal", got)
+	}
+	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
+		t.Fatalf("refusal left staged paths: %q", got)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(dir, "feature.txt")); readErr != nil || string(got) != "unrelated residue" {
+		t.Fatalf("refusal altered the protected edit: %q, %v", got, readErr)
 	}
 }
