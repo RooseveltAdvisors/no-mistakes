@@ -5,10 +5,26 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func panelText(view string) string {
+	stripped := stripANSI(view)
+	stripped = strings.NewReplacer("│", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ", "─", " ").Replace(stripped)
+	return strings.Join(strings.Fields(stripped), " ")
+}
+
+func assertPanelFitsWidth(t *testing.T, rendered string, width int) {
+	t.Helper()
+	for _, line := range strings.Split(stripANSI(rendered), "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Errorf("panel line exceeds declared width %d (%d): %q", width, got, line)
+		}
+	}
+}
 
 func TestBranchSyncActionRefreshesBeforeConfirmationAndAppliesThroughSharedPath(t *testing.T) {
 	run := &ipc.RunInfo{ID: "run-1", Branch: "feature", Status: types.RunRunning}
@@ -73,22 +89,22 @@ func TestBranchSyncActionRefreshesBeforeConfirmationAndAppliesThroughSharedPath(
 
 func TestLocalBranchStatusIsCompactAndOnlyOffersEligibleAction(t *testing.T) {
 	state := branchsync.State{State: branchsync.StateBehind, Safety: "refresh_required"}
-	view := stripANSI(renderLocalBranchStatus(&state, false, 80))
+	view := panelText(renderLocalBranchStatus(&state, false, 80))
 	if !strings.Contains(view, "Safe fast-forward available after refresh") || !strings.Contains(view, "u sync branch") {
 		t.Fatalf("behind view:\n%s", view)
 	}
 	state.State = branchsync.StateDiverged
-	view = stripANSI(renderLocalBranchStatus(&state, false, 80))
+	view = panelText(renderLocalBranchStatus(&state, false, 80))
 	if !strings.Contains(view, "diverged") || strings.Contains(view, "u sync branch") {
 		t.Fatalf("diverged view:\n%s", view)
 	}
 	state.NextAction = &branchsync.NextAction{Code: "sync", Command: "no-mistakes axi sync"}
-	view = stripANSI(renderLocalBranchStatus(&state, false, 80))
+	view = panelText(renderLocalBranchStatus(&state, false, 80))
 	if !strings.Contains(view, "equivalent work") || !strings.Contains(view, "u sync branch") {
 		t.Fatalf("equivalent candidate view:\n%s", view)
 	}
 	state.Safety = branchsync.SafetySafeEquivalentAdvance
-	view = stripANSI(renderLocalBranchStatus(&state, false, 80))
+	view = panelText(renderLocalBranchStatus(&state, false, 80))
 	if !strings.Contains(view, "represented in the live pipeline head") || strings.Contains(view, "No automatic reconciliation") {
 		t.Fatalf("equivalent live view:\n%s", view)
 	}
@@ -161,6 +177,83 @@ func TestSyncConfirmationEscapeNeverApplies(t *testing.T) {
 	}
 }
 
+// TestMissingPreservedHeadStatusShowsKeepLocalRecoveryCommand pins the
+// missing-head panel for the stacked incident shape: an older stranded run's
+// head is missing from both stores while the reported run's head is present in
+// the gate. The panel must name the run and head actually missing plus the
+// stores consulted, show its recovery command, never read as the present head
+// being the one that failed, and keep every rendered line within the declared
+// width. The recover-refusal and manual-reconciliation siblings carry the
+// same attribution and the same bound.
+func TestMissingPreservedHeadStatusShowsKeepLocalRecoveryCommand(t *testing.T) {
+	missingRun := "run-older"
+	missingHead := strings.Repeat("a", 40)
+	presentRun := "run-newest"
+	presentHead := strings.Repeat("b", 40)
+	state := branchsync.State{
+		State:  branchsync.StatePipelineOwned,
+		Safety: "blocked_recover_preserved_head_missing",
+		Pipeline: branchsync.PipelineState{
+			RunID: presentRun, Status: "failed", Phase: "pre_push", CurrentHead: presentHead,
+		},
+		NextAction: &branchsync.NextAction{
+			Code:    "recover_custody",
+			Command: "no-mistakes axi sync --recover --keep-local",
+		},
+		Error: "stranded recorded pipeline run " + missingRun + " head " + missingHead +
+			" not found in the invoking worktree /work/operator or the local gate /work/nm/repos/repo.git" +
+			"; recover custody by keeping the current local head, which discards the missing preserved commits",
+	}
+
+	for _, width := range []int{50, 80} {
+		rendered := renderLocalBranchStatus(&state, false, width)
+		assertPanelFitsWidth(t, rendered, width)
+		view := panelText(rendered)
+		if !strings.Contains(view, "no-mistakes axi sync --recover --keep-local") {
+			t.Fatalf("missing-head status did not show its recovery command at width %d:\n%s", width, rendered)
+		}
+		for _, want := range []string{missingRun, missingHead, "/work/operator", "/work/nm/repos/repo.git"} {
+			if !strings.Contains(view, want) {
+				t.Errorf("missing-head status omits %q at width %d:\n%s", want, width, rendered)
+			}
+		}
+		for _, unwanted := range []string{"without a recoverable preserved head", presentHead, presentRun} {
+			if strings.Contains(view, unwanted) {
+				t.Errorf("missing-head status blames the present head or keeps the old claim %q at width %d:\n%s", unwanted, width, rendered)
+			}
+		}
+	}
+
+	state.NextAction = nil
+	rendered := renderLocalBranchStatus(&state, false, 80)
+	assertPanelFitsWidth(t, rendered, 80)
+	view := panelText(rendered)
+	for _, want := range []string{missingRun, missingHead, "no-mistakes axi sync --recover --keep-local"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("recover-refusal status omits %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(view, "without a recoverable preserved head") || strings.Contains(view, presentHead) || strings.Contains(view, presentRun) {
+		t.Fatalf("recover-refusal status blames the present head or keeps the old claim:\n%s", rendered)
+	}
+
+	state.Safety = "blocked_recover_manual_reconciliation"
+	state.Error = "a stranded run has missing, unverified, or conflicting recovery evidence (recorded pipeline run " + missingRun + " head " + missingHead + " not found in the invoking worktree /work/operator or the local gate /work/nm/repos/repo.git); inspect and reconcile the recorded and live heads manually"
+	rendered = renderLocalBranchStatus(&state, false, 80)
+	assertPanelFitsWidth(t, rendered, 80)
+	view = panelText(rendered)
+	for _, want := range []string{missingRun, missingHead, "/work/operator", "/work/nm/repos/repo.git", "Do not make follow-up commits."} {
+		if !strings.Contains(view, want) {
+			t.Errorf("manual-reconciliation status omits %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{"without a recoverable preserved head", "not pushed yet", presentHead, presentRun} {
+		if strings.Contains(view, unwanted) {
+			t.Errorf("manual-reconciliation status blames the present head or keeps the old misattribution %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
 // TestRecoverableCustodyActionFlowsThroughConfirmationAndRecoverService covers
 // the TUI half of the guarded custody recovery: a terminal pre-push
 // pipeline_owned state renders the recovery offer, `u` opens an explicit
@@ -176,7 +269,7 @@ func TestRecoverableCustodyActionFlowsThroughConfirmationAndRecoverService(t *te
 	}
 	m.branchSync = &stranded
 
-	view := stripANSI(renderLocalBranchStatus(m.branchSync, false, 80))
+	view := panelText(renderLocalBranchStatus(m.branchSync, false, 80))
 	for _, want := range []string{"preserved in the local gate", "Recover custody", "u recover custody"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("recoverable status missing %q:\n%s", want, view)
@@ -184,7 +277,10 @@ func TestRecoverableCustodyActionFlowsThroughConfirmationAndRecoverService(t *te
 	}
 
 	recoverCalls := 0
-	m.syncRecover = func() branchsync.State {
+	m.syncRecover = func(keepLocal bool) branchsync.State {
+		if keepLocal {
+			t.Fatal("ordinary recovery unexpectedly selected keep-local")
+		}
 		recoverCalls++
 		recovered := stranded
 		recovered.State = branchsync.StateCustodyReturned
@@ -202,7 +298,7 @@ func TestRecoverableCustodyActionFlowsThroughConfirmationAndRecoverService(t *te
 		t.Fatalf("u must open confirmation without acting: confirm=%v calls=%d", m.recoverConfirm, recoverCalls)
 	}
 	plain := stripANSI(m.View())
-	for _, want := range []string{"custody", strings.Repeat("a", 40), strings.Repeat("c", 40), "u/enter recover", "--keep-local", "rerun"} {
+	for _, want := range []string{"custody", strings.Repeat("a", 40), strings.Repeat("c", 40), "u/enter recover", "--keep-local"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("recover confirmation missing %q:\n%s", want, plain)
 		}
@@ -222,9 +318,67 @@ func TestRecoverableCustodyActionFlowsThroughConfirmationAndRecoverService(t *te
 		t.Fatalf("successful recovery left an error: %v", m.err)
 	}
 
-	returned := stripANSI(renderLocalBranchStatus(m.branchSync, false, 80))
+	returned := panelText(renderLocalBranchStatus(m.branchSync, false, 80))
 	if !strings.Contains(returned, "Custody returned") {
 		t.Fatalf("custody_returned status:\n%s", returned)
+	}
+}
+
+func TestArchiveRecoveryConfirmationUsesOnlyGuardedKeepLocalAction(t *testing.T) {
+	run := &ipc.RunInfo{ID: "run-archive", Branch: "feature", Status: types.RunCancelled}
+	m := NewModel("socket", nil, run)
+	stranded := branchsync.State{
+		State: branchsync.StatePipelineOwned, Relation: branchsync.RelationDiverged, Safety: "blocked_pipeline_owned_recoverable",
+		Local:    branchsync.LocalState{Branch: "feature", Head: strings.Repeat("a", 40), Clean: true},
+		Pipeline: branchsync.PipelineState{RunID: run.ID, Status: "cancelled", Phase: "pre_push", CurrentHead: strings.Repeat("c", 40)},
+		Recovery: &branchsync.RecoveryEvidence{
+			Source: "bound_archive", RepositoryID: "repo-1", RunID: run.ID, Branch: "feature",
+			RequiredHead: strings.Repeat("a", 40), PreservedHead: strings.Repeat("c", 40),
+			ArchiveRef: "refs/heads/archive/run-archive", KeepLocal: true, Proof: "verified",
+		},
+		NextAction: &branchsync.NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover --keep-local"},
+	}
+	m.branchSync = &stranded
+	called := false
+	m.syncRecover = func(keepLocal bool) branchsync.State {
+		called = true
+		if !keepLocal {
+			t.Fatal("archive recovery did not use keep-local")
+		}
+		recovered := stranded
+		recovered.State = branchsync.StateSynchronized
+		recovered.Safety = "already_synchronized"
+		recovered.Recovered = true
+		recovered.Changed = false
+		return recovered
+	}
+
+	view := panelText(renderLocalBranchStatus(m.branchSync, false, 80))
+	for _, want := range []string{"verified archive", "exact required local head", "u recover custody"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("archive status missing %q:\n%s", want, view)
+		}
+	}
+	next, cmd := m.handleKey(keyMsg("u"))
+	m = next.(Model)
+	if cmd != nil || !m.recoverConfirm {
+		t.Fatal("archive recovery did not open confirmation")
+	}
+	confirmation := stripANSI(m.View())
+	for _, want := range []string{"never selects or replays the archive", stranded.Recovery.ArchiveRef, stranded.Recovery.RequiredHead} {
+		if !strings.Contains(confirmation, want) {
+			t.Errorf("archive confirmation missing %q:\n%s", want, confirmation)
+		}
+	}
+	next, cmd = m.handleKey(keyMsg("enter"))
+	m = next.(Model)
+	if cmd == nil || called {
+		t.Fatal("archive recovery did not wait for its command")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if !called || !m.branchSync.Recovered || m.branchSync.Changed {
+		t.Fatalf("archive recovery result = %#v", m.branchSync)
 	}
 }
 
@@ -238,11 +392,11 @@ func TestActivePipelineOwnedStateOffersNoRecoveryAction(t *testing.T) {
 		Local:    branchsync.LocalState{Branch: "feature", Head: strings.Repeat("a", 40), Clean: true},
 		Pipeline: branchsync.PipelineState{RunID: "run-1", Status: "running", Phase: "pre_push"},
 	}
-	m.syncRecover = func() branchsync.State {
+	m.syncRecover = func(bool) branchsync.State {
 		t.Fatal("recover service must not be reachable for an active run")
 		return branchsync.State{}
 	}
-	view := stripANSI(renderLocalBranchStatus(m.branchSync, false, 80))
+	view := panelText(renderLocalBranchStatus(m.branchSync, false, 80))
 	if strings.Contains(view, "recover") || !strings.Contains(view, "Do not make follow-up commits") {
 		t.Fatalf("active pipeline_owned view:\n%s", view)
 	}

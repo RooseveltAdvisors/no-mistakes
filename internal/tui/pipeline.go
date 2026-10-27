@@ -72,6 +72,8 @@ func runStatusStyled(status types.RunStatus) string {
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiGreen))
 	case types.RunFailed, types.RunCancelled:
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiRed))
+	case types.RunCIMonitorInterrupted:
+		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
 	default:
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiBrightBlack))
 	}
@@ -149,6 +151,9 @@ func renderPipelineView(run *ipc.RunInfo, steps []ipc.StepResultInfo, width int,
 		icon := stepStatusIndicator(step.Status, spinnerFrame)
 		style := stepStatusStyle(step.Status)
 		label := stepLabel(step.StepName)
+		if step.WorkScope == ipc.WorkScopeDocumentLintHousekeeping {
+			label = "Document + Lint housekeeping"
+		}
 
 		line := style.Render(icon) + " " + label
 
@@ -305,6 +310,15 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 
 	switch run.Status {
 	case types.RunCompleted:
+		// A human approved this run's CI gate while a live check was not
+		// resolved (see pipeline.ApprovalOverrideVerifier / run.CIOverrideReason).
+		// The TUI must say so, or the human-facing surface disagrees with axi
+		// (outcomeForRun), which already renders outcome=passed-with-override -
+		// exactly the ambiguity this exists to remove.
+		if run.CIOverrideReason != "" {
+			style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+			return style.Render("⚠ Pipeline passed with override: "+run.CIOverrideReason) + elapsed
+		}
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiGreen))
 		return style.Render("✓ Pipeline passed") + elapsed
 	case types.RunFailed:
@@ -324,6 +338,9 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 	case types.RunCancelled:
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiRed))
 		return style.Render("✗ Pipeline cancelled") + elapsed
+	case types.RunCIMonitorInterrupted:
+		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+		return style.Render("CI monitor interrupted") + elapsed
 	default:
 		return ""
 	}

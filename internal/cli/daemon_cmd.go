@@ -106,6 +106,21 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			launchNonce, err := parseLaunchNoncePushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
+			validationGeneration, err := parseValidationGenerationPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
+			if (launchNonce == "") != (validationGeneration == "") {
+				return fmt.Errorf("launch_nonce and validation_generation push options must be supplied together")
+			}
+			prBaseBranch, err := parsePRBaseBranchPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			gatePath, err := normalizeNotifyGatePath(gate)
 			if err != nil {
 				return err
@@ -124,12 +139,15 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
-				Gate:      gatePath,
-				Ref:       ref,
-				Old:       oldSHA,
-				New:       newSHA,
-				SkipSteps: skipSteps,
-				Intent:    intent,
+				Gate:                 gatePath,
+				Ref:                  ref,
+				Old:                  oldSHA,
+				New:                  newSHA,
+				SkipSteps:            skipSteps,
+				Intent:               intent,
+				LaunchNonce:          launchNonce,
+				ValidationGeneration: validationGeneration,
+				PRBaseBranch:         prBaseBranch,
 			}, &result)
 		},
 	}
@@ -194,6 +212,59 @@ func parseSkipSteps(value string) ([]types.StepName, error) {
 // survive the push-option transport (which is line-oriented).
 const intentPushOptionPrefix = "no-mistakes.intent="
 
+const (
+	launchNoncePushOptionPrefix          = "no-mistakes.launch-nonce="
+	validationGenerationPushOptionPrefix = "no-mistakes.validation-generation="
+)
+
+func formatLaunchNoncePushOption(nonce string) string {
+	return formatOpaquePushOption(launchNoncePushOptionPrefix, nonce)
+}
+
+func formatValidationGenerationPushOption(generation string) string {
+	return formatOpaquePushOption(validationGenerationPushOptionPrefix, generation)
+}
+
+func formatOpaquePushOption(prefix, value string) string {
+	if value == "" {
+		return ""
+	}
+	return prefix + base64.StdEncoding.EncodeToString([]byte(value))
+}
+
+func parseLaunchNoncePushOptions(options []string) (string, error) {
+	return parseOpaquePushOptions(options, launchNoncePushOptionPrefix, "launch nonce")
+}
+
+func parseValidationGenerationPushOptions(options []string) (string, error) {
+	return parseOpaquePushOptions(options, validationGenerationPushOptionPrefix, "validation generation")
+}
+
+// parseOpaquePushOptions rejects conflicting duplicates rather than selecting
+// one and manufacturing a receipt for a request no caller actually made.
+func parseOpaquePushOptions(options []string, prefix, label string) (string, error) {
+	value := ""
+	for _, option := range options {
+		encoded, ok := strings.CutPrefix(option, prefix)
+		if !ok {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", fmt.Errorf("decode %s push option: %w", label, err)
+		}
+		parsed := string(decoded)
+		if value != "" && value != parsed {
+			return "", fmt.Errorf("conflicting %s push options", label)
+		}
+		value = parsed
+	}
+	return value, nil
+}
+
+// prBaseBranchPushOptionPrefix carries a per-run PR base branch through a git push.
+const prBaseBranchPushOptionPrefix = "no-mistakes.pr-base-branch="
+
 // formatIntentPushOption encodes intent as a single push option, or returns ""
 // when there is no intent to carry.
 func formatIntentPushOption(intent string) string {
@@ -219,6 +290,33 @@ func parseIntentPushOptions(options []string) (string, error) {
 		intent = string(decoded)
 	}
 	return intent, nil
+}
+
+// formatPRBaseBranchPushOption encodes a per-run PR base branch as a push
+// option, or returns "" when unset.
+func formatPRBaseBranchPushOption(branch string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+	return prBaseBranchPushOptionPrefix + branch
+}
+
+// parsePRBaseBranchPushOptions extracts the per-run PR base branch push option,
+// if any. The last occurrence wins.
+func parsePRBaseBranchPushOptions(options []string) (string, error) {
+	branch := ""
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, prBaseBranchPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("pr base branch push option must not be empty")
+		}
+		branch = value
+	}
+	return branch, nil
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {
