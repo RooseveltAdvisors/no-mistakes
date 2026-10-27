@@ -1557,7 +1557,7 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 	}
 
 	summary := printedSyncSummary(out)
-	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree"} {
+	for _, want := range []string{f.runID, olderHead, f.gate, "invoking worktree", "; the keep-local recovery is `no-mistakes sync --recover --keep-local`"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("summary omits %q: %s", want, summary)
 		}
@@ -1591,7 +1591,7 @@ func TestHumanSyncMissingHeadSummaryNamesTheMissingRunNotPresentHead(t *testing.
 		t.Fatalf("manual-reconciliation confirmation should refuse, got %#v\n%s", err, out)
 	}
 	summary = printedSyncSummary(out)
-	for _, want := range []string{f.runID, olderHead, f.gate} {
+	for _, want := range []string{f.runID, olderHead, f.gate, "; do not make local follow-up commits"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("manual-reconciliation summary omits %q: %s", want, summary)
 		}

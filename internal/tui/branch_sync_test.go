@@ -242,7 +242,7 @@ func TestMissingPreservedHeadStatusShowsKeepLocalRecoveryCommand(t *testing.T) {
 	rendered = renderLocalBranchStatus(&state, false, 80)
 	assertPanelFitsWidth(t, rendered, 80)
 	view = panelText(rendered)
-	for _, want := range []string{missingRun, missingHead, "/work/operator", "/work/nm/repos/repo.git"} {
+	for _, want := range []string{missingRun, missingHead, "/work/operator", "/work/nm/repos/repo.git", "Do not make follow-up commits."} {
 		if !strings.Contains(view, want) {
 			t.Errorf("manual-reconciliation status omits %q:\n%s", want, rendered)
 		}
